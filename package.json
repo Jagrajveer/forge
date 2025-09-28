@@ -1,0 +1,35 @@
+{
+  "name": "forge",
+  "version": "0.1.0",
+  "description": "Forge CLI - AI coding assistant powered by xAI Grok",
+  "type": "module",
+  "bin": {
+    "forge": "dist/cli.js"
+  },
+  "scripts": {
+    "build": "tsc",
+    "start": "node dist/cli.js",
+    "lint": "eslint . --ext .ts",
+    "test": "echo \"No tests yet\" && exit 0",
+    "release": "npm publish"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "@types/prompts": "^2.4.9",
+    "eslint": "^9.0.0",
+    "prettier": "^3.3.0",
+    "ts-node": "^10.9.2",
+    "typescript": "^5.4.0"
+  },
+  "dependencies": {
+    "commander": "^12.1.0",
+    "diff": "^5.2.0",
+    "diff-match-patch": "^1.0.5",
+    "diff3": "^0.0.3",
+    "dotenv": "^16.4.5",
+    "pino": "^9.0.0",
+    "prompts": "^2.4.2",
+    "simple-git": "^3.25.0",
+    "zod": "^3.23.8"
+  }
+}
