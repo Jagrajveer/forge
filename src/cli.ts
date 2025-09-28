@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import "./config/env.js"; // load .env and prepare ENV/diagnostics
 import { Command } from "commander";
 import prompts from "prompts";
 import * as fs from "node:fs/promises";
@@ -8,6 +9,7 @@ import { GrokProvider } from "./providers/grok.js";
 import { runCommand } from "./core/tools/run.js";
 import { confirmYN } from "./ui/confirm.js";
 import { requiresApprovalForRun } from "./core/safety.js";
+import { ENV, envDiagnostics } from "./config/env.js";
 
 const program = new Command();
 program.name("forge").description("Grok-powered engineering copilot CLI").version("0.1.0");
@@ -15,17 +17,14 @@ program.name("forge").description("Grok-powered engineering copilot CLI").versio
 type Mode = "safe" | "balanced" | "auto";
 
 function modeFromFlags(opts: { auto?: boolean; safe?: boolean }): Mode {
-  // Force auto if env explicitly allows dangerous ops
-  if (/^true$/i.test(process.env.FORGE_ALLOW_DANGEROUS || "")) return "auto";
+  if (ENV.FORGE_ALLOW_DANGEROUS) return "auto";
   if (opts.auto) return "auto";
   if (opts.safe) return "safe";
   return "balanced";
 }
 
-const CMD_TIMEOUT =
-  Number.parseInt(process.env.FORGE_CMD_TIMEOUT_MS || "") || undefined;
-const STDIO_CAP =
-  Number.parseInt(process.env.FORGE_TOOL_STDIO_LIMIT || "") || undefined;
+const CMD_TIMEOUT = ENV.FORGE_CMD_TIMEOUT_MS;
+const STDIO_CAP = ENV.FORGE_TOOL_STDIO_LIMIT;
 
 async function makeProvider() {
   return new GrokProvider({});
@@ -119,7 +118,7 @@ program
     }
   });
 
-/** One shot question */
+/** One-shot question */
 program
   .command("ask <text...>")
   .description("Ask a single question (one-shot)")
@@ -172,6 +171,33 @@ program
   .action(async () => {
     const { model, reply, baseUrl } = await GrokProvider.ping();
     console.log(`OK: model=${model}, baseUrl=${baseUrl}, reply="${reply}"`);
+  });
+
+/** Env diagnostics */
+program
+  .command("env")
+  .description("Environment helpers")
+  .command("doctor")
+  .description("Print environment/config diagnostics")
+  .action(() => {
+    const diag = envDiagnostics();
+    console.log("cwd:", diag.cwd);
+    console.log("loadedEnvFiles:", diag.loadedEnvFiles.length ? diag.loadedEnvFiles : "(none)");
+    console.log("xaiBaseUrl:", diag.xaiBaseUrl);
+    console.log("xaiModel:", diag.xaiModel);
+    console.log("hasXaiApiKey:", diag.hasXaiApiKey ? "yes" : "NO");
+    if (!diag.hasXaiApiKey) {
+      console.error(
+        [
+          "",
+          "XAI_API_KEY is missing.",
+          "Fixes:",
+          "  1) Create a .env file in your project root containing: XAI_API_KEY=sk-xxxx",
+          "  2) Or export XAI_API_KEY in your shell before running forge.",
+          "  3) On Windows, if using `setx`, open a NEW terminal (setx applies to future shells only).",
+        ].join("\n")
+      );
+    }
   });
 
 /** Init memory file */
