@@ -1,6 +1,8 @@
 import "dotenv/config";
 import { z } from "zod";
 
+console.log(process.env)
+
 export const EnvSchema = z.object({
   FORGE_PROVIDER: z.enum(["xai", "openrouter"]).optional(),
   GROK_API_KEY: z.string().optional().transform(v => (v && v.trim()) || undefined),

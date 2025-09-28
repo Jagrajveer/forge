@@ -1,0 +1,77 @@
+// src/core/tools/run.ts
+import { spawn } from "node:child_process";
+
+export interface RunResult {
+  code: number | null;
+  stdout: string;
+  stderr: string;
+}
+
+export interface RunOptions {
+  cwd?: string;
+  env?: NodeJS.ProcessEnv;
+  stream?: (data: { stdout?: string; stderr?: string }) => void;
+  shell?: string;
+  timeoutMs?: number;
+  stdioCapBytes?: number; // soft cap for aggregated stdout/stderr
+}
+
+const DEFAULT_TIMEOUT =
+  Number.parseInt(process.env.FORGE_CMD_TIMEOUT_MS || "") || undefined;
+const DEFAULT_STDIO_CAP =
+  Number.parseInt(process.env.FORGE_TOOL_STDIO_LIMIT || "") || undefined;
+
+function capMerge(current: string, chunk: Buffer, cap?: number): string {
+  // For simplicity, cap by characters (approx bytes for ASCII; acceptable for logs)
+  const s = chunk.toString("utf8");
+  if (!cap) return current + s;
+  const merged = (current + s);
+  // Keep the last ~cap chars
+  return merged.length > cap ? merged.slice(merged.length - cap) : merged;
+}
+
+export function runCommand(cmd: string, opts: RunOptions = {}): Promise<RunResult> {
+  const timeoutMs = opts.timeoutMs ?? DEFAULT_TIMEOUT;
+  const stdioCap = opts.stdioCapBytes ?? DEFAULT_STDIO_CAP;
+
+  return new Promise((resolve, reject) => {
+    const child = spawn(cmd, {
+      cwd: opts.cwd,
+      env: { ...process.env, ...(opts.env || {}) },
+      shell: opts.shell ?? true,
+      windowsHide: true,
+    });
+
+    let stdout = "";
+    let stderr = "";
+
+    const onStdout = (chunk: Buffer) => {
+      stdout = capMerge(stdout, chunk, stdioCap);
+      opts.stream?.({ stdout: chunk.toString("utf8") });
+    };
+    const onStderr = (chunk: Buffer) => {
+      stderr = capMerge(stderr, chunk, stdioCap);
+      opts.stream?.({ stderr: chunk.toString("utf8") });
+    };
+
+    child.stdout?.on("data", onStdout);
+    child.stderr?.on("data", onStderr);
+
+    let timer: NodeJS.Timeout | undefined;
+    if (timeoutMs && timeoutMs > 0) {
+      timer = setTimeout(() => {
+        child.kill("SIGKILL");
+        reject(new Error(`Command timed out after ${timeoutMs}ms`));
+      }, timeoutMs);
+    }
+
+    child.on("error", (err) => {
+      if (timer) clearTimeout(timer);
+      reject(err);
+    });
+    child.on("close", (code) => {
+      if (timer) clearTimeout(timer);
+      resolve({ code, stdout, stderr });
+    });
+  });
+}

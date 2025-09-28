@@ -1,23 +1,16 @@
 // src/providers/grok.ts
 /**
- * GrokProvider
- * ------------
- * Lightweight wrapper around an xAI Grok-compatible Chat Completions API.
- * - Node 20+: uses global fetch + WHATWG streams
- * - Supports non-streaming and streaming responses
- * - Streaming returns an AsyncGenerator<string> (an AsyncIterable)
- *
- * Env vars supported:
- *   - GROK_API_KEY or XAI_API_KEY
- *   - GROK_BASE_URL (default: https://api.x.ai/v1/chat/completions)
- *   - GROK_MODEL   (default: grok-2-latest)
+ * GrokProvider (xAI)
+ * Env:
+ *   XAI_API_KEY or GROK_API_KEY (required)
+ *   XAI_BASE_URL or GROK_BASE_URL (host or endpoint; we normalize)
+ *   XAI_MODEL or GROK_MODEL (default: grok-3)
  */
 
 export type Role = "system" | "user" | "assistant" | "tool";
 
 export interface ChatMessage {
   role: Role;
-  // Accept string or a structured object (we'll stringify objects)
   content: string | object;
 }
 
@@ -25,7 +18,6 @@ export interface UsageMeta {
   prompt_tokens?: number;
   completion_tokens?: number;
   total_tokens?: number;
-  // allow provider-specific fields
   [k: string]: unknown;
 }
 
@@ -34,24 +26,19 @@ export interface GrokOptions {
   baseUrl?: string;
   model?: string;
   headers?: Record<string, string>;
-  // Optional: temperature, top_p, etc.
   temperature?: number;
   top_p?: number;
 }
 
-type NonStreamResult = {
-  text: string;
-  usage?: UsageMeta;
-  raw?: any;
-};
-
+type NonStreamResult = { text: string; usage?: UsageMeta; raw?: any };
 type ChatStream = AsyncIterable<string>;
 type ChatNonStream = Promise<NonStreamResult>;
 type ChatReturn = ChatStream | ChatNonStream;
 
 class GrokProvider {
   private apiKey: string;
-  public readonly baseUrl: string;
+  public readonly baseUrl: string;   // e.g. https://api.x.ai
+  private readonly chatUrl: string;  // e.g. https://api.x.ai/v1/chat/completions
   public readonly model: string;
   private headers: Record<string, string>;
   private temperature?: number;
@@ -60,22 +47,35 @@ class GrokProvider {
   constructor(opts: GrokOptions = {}) {
     const envKey =
       opts.apiKey ??
-      process.env.GROK_API_KEY ??
       process.env.XAI_API_KEY ??
+      process.env.GROK_API_KEY ??
       "";
 
     if (!envKey) {
       throw new Error(
-        "Missing API key: set GROK_API_KEY or XAI_API_KEY, or pass { apiKey } to GrokProvider."
+        "Missing API key: set XAI_API_KEY (preferred) or GROK_API_KEY, or pass { apiKey } to GrokProvider."
       );
     }
 
-    this.apiKey = envKey;
-    this.baseUrl =
+    const rawBase =
       opts.baseUrl ??
+      process.env.XAI_BASE_URL ??
       process.env.GROK_BASE_URL ??
-      "https://api.x.ai/v1/chat/completions";
-    this.model = opts.model ?? process.env.GROK_MODEL ?? "grok-2-latest";
+      "https://api.x.ai";
+
+    // Normalize: allow host, host + /v1, or full /v1/chat/completions
+    const trimmed = rawBase.replace(/\/+$/, "");
+    const normalizedHost = trimmed.replace(/\/v1(?:\/chat\/completions)?$/i, "");
+    this.baseUrl = normalizedHost || "https://api.x.ai";
+    this.chatUrl = `${this.baseUrl}/v1/chat/completions`;
+
+    this.model =
+      opts.model ??
+      process.env.XAI_MODEL ??
+      process.env.GROK_MODEL ??
+      "grok-3";
+
+    this.apiKey = envKey;
     this.headers = {
       "Content-Type": "application/json",
       Authorization: `Bearer ${this.apiKey}`,
@@ -86,10 +86,6 @@ class GrokProvider {
     this.top_p = opts.top_p;
   }
 
-  /**
-   * Static ping helper to satisfy CLI usage:
-   * const { model, reply, provider, baseUrl } = await GrokProvider.ping();
-   */
   public static async ping(opts: GrokOptions = {}): Promise<{
     model: string;
     reply: string;
@@ -98,42 +94,30 @@ class GrokProvider {
   }> {
     const provider = new GrokProvider(opts);
     const { text } = await provider.complete([{ role: "user", content: "ping" }]);
-    return {
-      model: provider.model,
-      reply: text,
-      provider,
-      baseUrl: provider.baseUrl,
-    };
+    return { model: provider.model, reply: text, provider, baseUrl: provider.baseUrl };
   }
 
-  /**
-   * Overloads so stream=true returns an AsyncIterable (usable in `for await`),
-   * while stream=false (or omitted) returns a Promise with the full result.
-   */
   public chat(messages: ChatMessage[], options?: { stream?: false }): ChatNonStream;
   public chat(messages: ChatMessage[], options: { stream: true }): ChatStream;
   public chat(messages: ChatMessage[], options: { stream?: boolean } = {}): ChatReturn {
-    // NOTE: not async, so we can return the AsyncIterable directly for streaming.
-    if (options.stream) {
-      const normalized = this.normalizeMessages(messages);
-      return this.streamResponse(normalized);
-    }
-    return this.complete(messages); // Promise<NonStreamResult>
+    if (options.stream) return this.streamResponse(this.normalizeMessages(messages));
+    return this.complete(messages);
   }
 
-  /**
-   * Convenience method for non-streaming completion.
-   */
   public async complete(messages: ChatMessage[]): Promise<NonStreamResult> {
     const normalized = this.normalizeMessages(messages);
-    const res = await this.request(normalized, /*stream*/ false);
+    const res = await this.request(this.chatUrl, normalized, /*stream*/ false);
     const json = await this.safeJson(res);
 
     if (!res.ok) {
+      const hint =
+        res.status === 404
+          ? ` (tip: check XAI_BASE_URL and XAI_MODEL; try XAI_BASE_URL=https://api.x.ai and XAI_MODEL=grok-3)`
+          : "";
       const msg =
         json?.error?.message ??
         json?.message ??
-        `Grok API error: ${res.status} ${res.statusText}`;
+        `xAI error ${res.status} ${res.statusText}${hint}`;
       throw new Error(msg);
     }
 
@@ -142,73 +126,45 @@ class GrokProvider {
     return { text, usage, raw: json };
   }
 
-  /**
-   * Internal: perform the POST request to the chat completions endpoint.
-   */
   private async request(
+    url: string,
     messages: Array<{ role: Role; content: string }>,
     stream: boolean
   ): Promise<Response> {
-    const body: Record<string, unknown> = {
-      model: this.model,
-      messages,
-      stream,
-    };
-
+    const body: Record<string, unknown> = { model: this.model, messages, stream };
     if (typeof this.temperature === "number") body.temperature = this.temperature;
     if (typeof this.top_p === "number") body.top_p = this.top_p;
 
-    return fetch(this.baseUrl, {
+    return fetch(url, {
       method: "POST",
       headers: this.headers,
       body: JSON.stringify(body),
     });
   }
 
-  /**
-   * Internal: normalize message content to strings for the API.
-   */
   private normalizeMessages(
     messages: ChatMessage[]
   ): Array<{ role: Role; content: string }> {
     return messages.map((m) => ({
       role: m.role,
-      content:
-        typeof m.content === "string" ? m.content : JSON.stringify(m.content),
+      content: typeof m.content === "string" ? m.content : JSON.stringify(m.content),
     }));
   }
 
-  /**
-   * Internal: extract text in a provider-tolerant way.
-   * Supports both Chat Completions ("message.content") and
-   * legacy text ("choices[0].text") shapes.
-   */
   private extractText(json: any): string {
-    // Chat Completions style
     const cc =
       json?.choices?.[0]?.message?.content ??
       json?.choices?.[0]?.delta?.content ??
       json?.choices?.[0]?.text ??
       "";
-
     if (typeof cc === "string") return cc;
-
-    // If provider sent content as array (e.g., tool messages), flatten text parts
-    if (Array.isArray(cc)) {
-      return cc
-        .map((part) =>
-          typeof part === "string" ? part : part?.text ?? part?.content ?? ""
-        )
-        .join("");
-    }
-    return "";
+    return Array.isArray(cc)
+      ? cc.map((p: any) => (typeof p === "string" ? p : p?.text ?? p?.content ?? "")).join("")
+      : "";
   }
 
-  /**
-   * Internal: extract usage in a tolerant way.
-   */
   public extractUsage(json: any): UsageMeta | undefined {
-    const usage: UsageMeta | undefined = json?.usage
+    return json?.usage
       ? {
           prompt_tokens: json.usage.prompt_tokens,
           completion_tokens: json.usage.completion_tokens,
@@ -216,39 +172,26 @@ class GrokProvider {
           ...json.usage,
         }
       : undefined;
-    return usage;
   }
 
-  /**
-   * Streaming path: returns an AsyncGenerator that yields content chunks.
-   * This uses an SSE-style parser tolerant to different shapes:
-   * - { choices: [{ delta: { content: "..." } }] }
-   * - { choices: [{ text: "..." }] }
-   * - { message: { content: "..." } }
-   */
   private async *streamResponse(
     messages: Array<{ role: Role; content: string }>
   ): AsyncGenerator<string, void, unknown> {
-    const res = await this.request(messages, /*stream*/ true);
+    const res = await this.request(this.chatUrl, messages, /*stream*/ true);
 
-    // If the server returns an error, surface it (attempt JSON first).
     if (!res.ok) {
       let errText: string | undefined;
       try {
-        const json = await res.json();
-        errText = json?.error?.message ?? json?.message ?? JSON.stringify(json);
+        const j = await res.json();
+        errText = j?.error?.message ?? j?.message ?? JSON.stringify(j);
       } catch {
-        try {
-          errText = await res.text();
-        } catch {
-          /* noop */
-        }
+        try { errText = await res.text(); } catch {}
       }
-      throw new Error(
-        `Grok API streaming error: ${res.status} ${res.statusText}${
-          errText ? ` - ${errText}` : ""
-        }`
-      );
+      const hint =
+        res.status === 404
+          ? ` (tip: check XAI_BASE_URL and XAI_MODEL; try XAI_BASE_URL=https://api.x.ai and XAI_MODEL=grok-3)`
+          : "";
+      throw new Error(`xAI streaming error ${res.status} ${res.statusText}${hint}${errText ? ` - ${errText}` : ""}`);
     }
 
     if (!res.body) return;
@@ -258,38 +201,27 @@ class GrokProvider {
     let buffer = "";
 
     const flushEvents = function* (buf: string): Generator<string, string, void> {
-      // Split on double newlines (SSE event boundary) but also handle NDJSON/newline chunks.
       let rest = buf;
       const sep = /\r?\n\r?\n/;
       while (true) {
         const match = sep.exec(rest);
         if (!match) break;
-
         const idx = match.index;
-        const eventBlock = rest.slice(0, idx);
+        const block = rest.slice(0, idx);
         rest = rest.slice(idx + match[0].length);
+        const t = block.trim();
+        if (!t) continue;
 
-        const maybe = eventBlock.trim();
-        if (!maybe) continue;
-
-        // If it looks like SSE with data: lines
-        if (maybe.startsWith("data:")) {
-          const lines = maybe
+        if (t.startsWith("data:")) {
+          const lines = t
             .split(/\r?\n/)
             .map((l) => (l.startsWith("data:") ? l.slice(5).trimStart() : ""))
             .filter(Boolean);
-
-          const dataPayload = lines.join("\n");
-
-          if (dataPayload === "[DONE]") {
-            yield "__DONE__";
-            continue;
-          }
-
-          yield dataPayload;
+          const data = lines.join("\n");
+          if (data === "[DONE]") yield "__DONE__";
+          else yield data;
         } else {
-          // Not SSE; maybe NDJSON or plain JSON blob
-          yield maybe;
+          yield t;
         }
       }
       return rest;
@@ -301,67 +233,41 @@ class GrokProvider {
 
       buffer += decoder.decode(value, { stream: true });
 
-      // Try to flush complete events as they arrive
       for (const payload of flushEvents(buffer)) {
-        if (payload === "__DONE__") {
-          return; // graceful end of stream
-        }
+        if (payload === "__DONE__") return;
 
-        // Each payload should be a JSON chunk (SSE "data:" line or NDJSON)
         let json: any;
-        try {
-          json = JSON.parse(payload);
-        } catch {
-          if (payload) yield payload; // raw text fallback
-          continue;
-        }
+        try { json = JSON.parse(payload); }
+        catch { if (payload) yield payload; continue; }
 
-        // Extract chunked content in a tolerant way
         const chunk: string =
           json?.choices?.[0]?.delta?.content ??
           json?.choices?.[0]?.text ??
           json?.message?.content ??
           "";
-
         if (chunk) yield chunk;
       }
 
-      // Keep only trailing partial data (if any)
-      const lastSepIndex =
-        Math.max(buffer.lastIndexOf("\n\n"), buffer.lastIndexOf("\r\n\r\n"));
-      buffer = lastSepIndex >= 0 ? buffer.slice(lastSepIndex + 2) : buffer;
+      const lastSep = Math.max(buffer.lastIndexOf("\n\n"), buffer.lastIndexOf("\r\n\r\n"));
+      buffer = lastSep >= 0 ? buffer.slice(lastSep + 2) : buffer;
     }
 
-    // Final attempt on any trailing JSON
     const tail = buffer.trim();
     if (tail) {
       try {
-        const json = JSON.parse(tail);
+        const j = JSON.parse(tail);
         const last =
-          json?.choices?.[0]?.delta?.content ??
-          json?.choices?.[0]?.text ??
-          json?.message?.content ??
-          "";
+          j?.choices?.[0]?.delta?.content ?? j?.choices?.[0]?.text ?? j?.message?.content ?? "";
         if (last) yield last;
-      } catch {
-        /* ignore */
-      }
+      } catch {}
     }
   }
 
-  /**
-   * Safe JSON parse for fetch Response.
-   */
   private async safeJson(res: Response): Promise<any> {
-    try {
-      return await res.json();
-    } catch {
-      try {
-        const t = await res.text();
-        return { message: t };
-      } catch {
-        return {};
-      }
+    try { return await res.json(); }
+    catch {
+      try { const t = await res.text(); return { message: t }; }
+      catch { return {}; }
     }
   }
 }
