@@ -1,14 +1,52 @@
-export function printTokenPanel(usage?: {
-  input?: number;
-  output?: number;
-  total?: number;
-  estCostUSD?: number;
+import * as readline from "node:readline";
+import { Writable } from "node:stream";
+
+export type RenderMode = "append" | "refresh";
+
+export class AppendOnlyStream {
+  constructor(private out: Writable = process.stdout) {}
+
+  write(token: string) {
+    // Only ever append. No carriage returns, no clearLine calls.
+    this.out.write(token);
+  }
+
+  newline() {
+    this.out.write("\n");
+  }
+}
+
+export function renderPlan({
+  plan,
+  rationale,
+}: {
+  plan: string[];
+  rationale?: string;
 }) {
-  if (!usage) return;
-  const parts: string[] = [];
-  if (usage.input != null) parts.push(`in: ${usage.input}`);
-  if (usage.output != null) parts.push(`out: ${usage.output}`);
-  if (usage.total != null) parts.push(`total: ${usage.total}`);
-  if (usage.estCostUSD != null) parts.push(`$${usage.estCostUSD.toFixed(4)}`);
-  if (parts.length) console.log(`[tokens] ${parts.join("  |  ")}`);
+  const lines: string[] = [];
+  if (plan?.length) {
+    lines.push("\n▶ Plan");
+    for (const step of plan) lines.push(`  • ${step}`);
+  }
+  if (rationale) {
+    lines.push("\n▶ Why");
+    lines.push(`  ${rationale}`);
+  }
+  return lines.join("\n") + "\n";
+}
+
+export function renderTokensPanel(usage?: {
+  inputTokens?: number;
+  outputTokens?: number;
+  costUSD?: number;
+  model?: string;
+}) {
+  if (!usage) return "";
+  const parts = [
+    `model=${usage.model ?? "unknown"}`,
+    `in=${usage.inputTokens ?? 0}`,
+    `out=${usage.outputTokens ?? 0}`,
+    usage.costUSD !== undefined ? `cost=$${usage.costUSD.toFixed(6)}` : undefined,
+  ].filter(Boolean);
+  return `\n⏱️ Tokens: ${parts.join("  ")}\n`;
 }

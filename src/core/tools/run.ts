@@ -1,4 +1,3 @@
-// src/core/tools/run.ts
 import { spawn } from "node:child_process";
 
 export interface RunResult {
@@ -11,7 +10,7 @@ export interface RunOptions {
   cwd?: string;
   env?: NodeJS.ProcessEnv;
   stream?: (data: { stdout?: string; stderr?: string }) => void;
-  shell?: string;
+  shell?: string | boolean;
   timeoutMs?: number;
   stdioCapBytes?: number; // soft cap for aggregated stdout/stderr
 }
@@ -25,12 +24,27 @@ function capMerge(current: string, chunk: Buffer, cap?: number): string {
   // For simplicity, cap by characters (approx bytes for ASCII; acceptable for logs)
   const s = chunk.toString("utf8");
   if (!cap) return current + s;
-  const merged = (current + s);
+  const merged = current + s;
   // Keep the last ~cap chars
   return merged.length > cap ? merged.slice(merged.length - cap) : merged;
 }
 
-export function runCommand(cmd: string, opts: RunOptions = {}): Promise<RunResult> {
+// Overload 1: object options (preferred)
+export function runCommand(cmd: string, opts?: RunOptions): Promise<RunResult>;
+// Overload 2: numeric timeout (legacy/callsite-agnostic)
+export function runCommand(cmd: string, timeoutMs?: number): Promise<RunResult>;
+
+// Implementation: accepts either RunOptions or number and normalizes to options.
+// (Implementation must be general enough to satisfy both overloads.) :contentReference[oaicite:1]{index=1}
+export function runCommand(
+  cmd: string,
+  optsOrTimeout?: RunOptions | number
+): Promise<RunResult> {
+  const opts: RunOptions =
+    typeof optsOrTimeout === "number"
+      ? { timeoutMs: optsOrTimeout }
+      : optsOrTimeout ?? {};
+
   const timeoutMs = opts.timeoutMs ?? DEFAULT_TIMEOUT;
   const stdioCap = opts.stdioCapBytes ?? DEFAULT_STDIO_CAP;
 
@@ -38,6 +52,7 @@ export function runCommand(cmd: string, opts: RunOptions = {}): Promise<RunResul
     const child = spawn(cmd, {
       cwd: opts.cwd,
       env: { ...process.env, ...(opts.env || {}) },
+      // On Windows, using shell ensures .bat/.cmd & built-ins resolve correctly. :contentReference[oaicite:2]{index=2}
       shell: opts.shell ?? true,
       windowsHide: true,
     });
@@ -60,7 +75,8 @@ export function runCommand(cmd: string, opts: RunOptions = {}): Promise<RunResul
     let timer: NodeJS.Timeout | undefined;
     if (timeoutMs && timeoutMs > 0) {
       timer = setTimeout(() => {
-        child.kill("SIGKILL");
+        // Reject on timeout to match existing behavior at call sites.
+        try { child.kill("SIGKILL"); } catch { /* ignore */ }
         reject(new Error(`Command timed out after ${timeoutMs}ms`));
       }, timeoutMs);
     }

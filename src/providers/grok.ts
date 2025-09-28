@@ -1,276 +1,191 @@
-// src/providers/grok.ts
-/**
- * GrokProvider (xAI)
- * Env:
- *   XAI_API_KEY or GROK_API_KEY (required)
- *   XAI_BASE_URL or GROK_BASE_URL (host or endpoint; we normalize)
- *   XAI_MODEL or GROK_MODEL (default: grok-3)
- */
-
-export type Role = "system" | "user" | "assistant" | "tool";
-
-export interface ChatMessage {
-  role: Role;
-  content: string | object;
-}
+/* Provider adapter for Grok via OpenRouter or direct x.ai */
+import { loadProfile } from "../config/profile.js";
 
 export interface UsageMeta {
-  prompt_tokens?: number;
-  completion_tokens?: number;
-  total_tokens?: number;
-  [k: string]: unknown;
-}
-
-export interface GrokOptions {
-  apiKey?: string;
-  baseUrl?: string;
+  inputTokens?: number;
+  outputTokens?: number;
+  costUSD?: number;
   model?: string;
-  headers?: Record<string, string>;
-  temperature?: number;
-  top_p?: number;
 }
 
-type NonStreamResult = { text: string; usage?: UsageMeta; raw?: any };
-type ChatStream = AsyncIterable<string>;
-type ChatNonStream = Promise<NonStreamResult>;
-type ChatReturn = ChatStream | ChatNonStream;
-
-class GrokProvider {
-  private apiKey: string;
-  public readonly baseUrl: string;   // e.g. https://api.x.ai
-  private readonly chatUrl: string;  // e.g. https://api.x.ai/v1/chat/completions
-  public readonly model: string;
-  private headers: Record<string, string>;
-  private temperature?: number;
-  private top_p?: number;
-
-  constructor(opts: GrokOptions = {}) {
-    const envKey =
-      opts.apiKey ??
-      process.env.XAI_API_KEY ??
-      process.env.GROK_API_KEY ??
-      "";
-
-    if (!envKey) {
-      throw new Error(
-        "Missing API key: set XAI_API_KEY (preferred) or GROK_API_KEY, or pass { apiKey } to GrokProvider."
-      );
+export interface LLM {
+  chat(
+    messages: Array<{ role: "system" | "user" | "assistant"; content: string }>,
+    options?: {
+      stream?: boolean;
+      maxTokens?: number;
+      temperature?: number;
+      reasoning?: boolean;
     }
-
-    const rawBase =
-      opts.baseUrl ??
-      process.env.XAI_BASE_URL ??
-      process.env.GROK_BASE_URL ??
-      "https://api.x.ai";
-
-    // Normalize: allow host, host + /v1, or full /v1/chat/completions
-    const trimmed = rawBase.replace(/\/+$/, "");
-    const normalizedHost = trimmed.replace(/\/v1(?:\/chat\/completions)?$/i, "");
-    this.baseUrl = normalizedHost || "https://api.x.ai";
-    this.chatUrl = `${this.baseUrl}/v1/chat/completions`;
-
-    this.model =
-      opts.model ??
-      process.env.XAI_MODEL ??
-      process.env.GROK_MODEL ??
-      "grok-3";
-
-    this.apiKey = envKey;
-    this.headers = {
-      "Content-Type": "application/json",
-      Authorization: `Bearer ${this.apiKey}`,
-      ...(opts.headers ?? {}),
-    };
-
-    this.temperature = opts.temperature;
-    this.top_p = opts.top_p;
-  }
-
-  public static async ping(opts: GrokOptions = {}): Promise<{
-    model: string;
-    reply: string;
-    provider: GrokProvider;
-    baseUrl: string;
-  }> {
-    const provider = new GrokProvider(opts);
-    const { text } = await provider.complete([{ role: "user", content: "ping" }]);
-    return { model: provider.model, reply: text, provider, baseUrl: provider.baseUrl };
-  }
-
-  public chat(messages: ChatMessage[], options?: { stream?: false }): ChatNonStream;
-  public chat(messages: ChatMessage[], options: { stream: true }): ChatStream;
-  public chat(messages: ChatMessage[], options: { stream?: boolean } = {}): ChatReturn {
-    if (options.stream) return this.streamResponse(this.normalizeMessages(messages));
-    return this.complete(messages);
-  }
-
-  public async complete(messages: ChatMessage[]): Promise<NonStreamResult> {
-    const normalized = this.normalizeMessages(messages);
-    const res = await this.request(this.chatUrl, normalized, /*stream*/ false);
-    const json = await this.safeJson(res);
-
-    if (!res.ok) {
-      const hint =
-        res.status === 404
-          ? ` (tip: check XAI_BASE_URL and XAI_MODEL; try XAI_BASE_URL=https://api.x.ai and XAI_MODEL=grok-3)`
-          : "";
-      const msg =
-        json?.error?.message ??
-        json?.message ??
-        `xAI error ${res.status} ${res.statusText}${hint}`;
-      throw new Error(msg);
-    }
-
-    const text = this.extractText(json);
-    const usage = this.extractUsage(json);
-    return { text, usage, raw: json };
-  }
-
-  private async request(
-    url: string,
-    messages: Array<{ role: Role; content: string }>,
-    stream: boolean
-  ): Promise<Response> {
-    const body: Record<string, unknown> = { model: this.model, messages, stream };
-    if (typeof this.temperature === "number") body.temperature = this.temperature;
-    if (typeof this.top_p === "number") body.top_p = this.top_p;
-
-    return fetch(url, {
-      method: "POST",
-      headers: this.headers,
-      body: JSON.stringify(body),
-    });
-  }
-
-  private normalizeMessages(
-    messages: ChatMessage[]
-  ): Array<{ role: Role; content: string }> {
-    return messages.map((m) => ({
-      role: m.role,
-      content: typeof m.content === "string" ? m.content : JSON.stringify(m.content),
-    }));
-  }
-
-  private extractText(json: any): string {
-    const cc =
-      json?.choices?.[0]?.message?.content ??
-      json?.choices?.[0]?.delta?.content ??
-      json?.choices?.[0]?.text ??
-      "";
-    if (typeof cc === "string") return cc;
-    return Array.isArray(cc)
-      ? cc.map((p: any) => (typeof p === "string" ? p : p?.text ?? p?.content ?? "")).join("")
-      : "";
-  }
-
-  public extractUsage(json: any): UsageMeta | undefined {
-    return json?.usage
-      ? {
-          prompt_tokens: json.usage.prompt_tokens,
-          completion_tokens: json.usage.completion_tokens,
-          total_tokens: json.usage.total_tokens,
-          ...json.usage,
-        }
-      : undefined;
-  }
-
-  private async *streamResponse(
-    messages: Array<{ role: Role; content: string }>
-  ): AsyncGenerator<string, void, unknown> {
-    const res = await this.request(this.chatUrl, messages, /*stream*/ true);
-
-    if (!res.ok) {
-      let errText: string | undefined;
-      try {
-        const j = await res.json();
-        errText = j?.error?.message ?? j?.message ?? JSON.stringify(j);
-      } catch {
-        try { errText = await res.text(); } catch {}
-      }
-      const hint =
-        res.status === 404
-          ? ` (tip: check XAI_BASE_URL and XAI_MODEL; try XAI_BASE_URL=https://api.x.ai and XAI_MODEL=grok-3)`
-          : "";
-      throw new Error(`xAI streaming error ${res.status} ${res.statusText}${hint}${errText ? ` - ${errText}` : ""}`);
-    }
-
-    if (!res.body) return;
-
-    const reader = res.body.getReader();
-    const decoder = new TextDecoder("utf-8");
-    let buffer = "";
-
-    const flushEvents = function* (buf: string): Generator<string, string, void> {
-      let rest = buf;
-      const sep = /\r?\n\r?\n/;
-      while (true) {
-        const match = sep.exec(rest);
-        if (!match) break;
-        const idx = match.index;
-        const block = rest.slice(0, idx);
-        rest = rest.slice(idx + match[0].length);
-        const t = block.trim();
-        if (!t) continue;
-
-        if (t.startsWith("data:")) {
-          const lines = t
-            .split(/\r?\n/)
-            .map((l) => (l.startsWith("data:") ? l.slice(5).trimStart() : ""))
-            .filter(Boolean);
-          const data = lines.join("\n");
-          if (data === "[DONE]") yield "__DONE__";
-          else yield data;
-        } else {
-          yield t;
-        }
-      }
-      return rest;
-    };
-
-    while (true) {
-      const { value, done } = await reader.read();
-      if (done) break;
-
-      buffer += decoder.decode(value, { stream: true });
-
-      for (const payload of flushEvents(buffer)) {
-        if (payload === "__DONE__") return;
-
-        let json: any;
-        try { json = JSON.parse(payload); }
-        catch { if (payload) yield payload; continue; }
-
-        const chunk: string =
-          json?.choices?.[0]?.delta?.content ??
-          json?.choices?.[0]?.text ??
-          json?.message?.content ??
-          "";
-        if (chunk) yield chunk;
-      }
-
-      const lastSep = Math.max(buffer.lastIndexOf("\n\n"), buffer.lastIndexOf("\r\n\r\n"));
-      buffer = lastSep >= 0 ? buffer.slice(lastSep + 2) : buffer;
-    }
-
-    const tail = buffer.trim();
-    if (tail) {
-      try {
-        const j = JSON.parse(tail);
-        const last =
-          j?.choices?.[0]?.delta?.content ?? j?.choices?.[0]?.text ?? j?.message?.content ?? "";
-        if (last) yield last;
-      } catch {}
-    }
-  }
-
-  private async safeJson(res: Response): Promise<any> {
-    try { return await res.json(); }
-    catch {
-      try { const t = await res.text(); return { message: t }; }
-      catch { return {}; }
-    }
-  }
+  ): AsyncIterable<string> | Promise<{ text: string; usage?: UsageMeta }>;
 }
 
-export default GrokProvider;
-export { GrokProvider };
+export class GrokProvider implements LLM {
+  constructor(private cfg = loadProfile()) {}
+
+  /** Ensure base URL matches provider expectations and includes version segment when needed. */
+  private normalizedBaseUrl(): string {
+    let base = this.cfg.baseUrl ?? (this.cfg.provider === "openrouter"
+      ? "https://openrouter.ai/api/v1"
+      : "https://api.x.ai/v1");
+
+    // Trim trailing slashes
+    base = base.replace(/\/+$/, "");
+
+    // If calling x.ai directly and /vN is missing, add /v1
+    try {
+      const u = new URL(base);
+      const isXai = /(^|\.)x\.ai$/i.test(u.hostname);
+      const hasV = /\/v\d+(\/|$)?/i.test(u.pathname);
+      if (isXai && !hasV) {
+        base = `${base}/v1`; // xAI uses /v1/chat/completions
+      }
+    } catch {
+      // if not a valid URL, leave as-is
+    }
+    return base;
+  }
+
+  private endpoint(): string {
+    const base = this.normalizedBaseUrl();
+    return `${base}/chat/completions`;
+  }
+
+  private headers(): Record<string, string> {
+    const h: Record<string, string> = { "Content-Type": "application/json" };
+    if (this.cfg.apiKey) h["Authorization"] = `Bearer ${this.cfg.apiKey}`;
+    // Extra headers are OK for OpenRouter; harmless for xAI, but we can keep them generic.
+    h["HTTP-Referer"] = "https://github.com/savant-ai/forge";
+    h["X-Title"] = "forge-cli";
+    return h;
+  }
+
+  chat(
+    messages: Array<{ role: "system" | "user" | "assistant"; content: string }>,
+    options: { stream?: boolean; maxTokens?: number; temperature?: number; reasoning?: boolean } = {}
+  ): AsyncIterable<string> | Promise<{ text: string; usage?: UsageMeta }> {
+    const body: any = {
+      model: this.cfg.model, // normalized in profile loader
+      messages,
+      stream: Boolean(options.stream),
+      temperature: options.temperature ?? 0.3,
+      max_tokens: options.maxTokens ?? 2048,
+    };
+
+    // xAI & OpenRouter both accept OpenAI-style Chat Completions; xAI streams via SSE, too. :contentReference[oaicite:1]{index=1}
+    if (options.reasoning) {
+      // Best-effort hint; ignored by providers that don't use it.
+      body.reasoning = { effort: "medium" };
+    }
+
+    // STREAMING: return a true async generator (not a Promise)
+    if (body.stream) {
+      const self = this;
+      return (async function* () {
+        const res = await fetch(self.endpoint(), {
+          method: "POST",
+          headers: self.headers(),
+          body: JSON.stringify(body),
+        });
+
+        if (!res.ok) {
+          const txt = await res.text().catch(() => "");
+          // Helpful tip for common misconfig: missing /v1 on xAI base
+          if (res.status === 404) {
+            throw new Error(
+              `Grok request failed: 404 Not Found\n` +
+              `Hint: if you're using xAI directly, the base URL must include /v1 (e.g., https://api.x.ai/v1). Response:\n${txt}`
+            );
+          }
+          throw new Error(`Grok request failed: ${res.status} ${res.statusText}\n${txt}`);
+        }
+
+        const reader = res.body?.getReader();
+        if (!reader) return;
+
+        const decoder = new TextDecoder();
+        let buf = "";
+
+        while (true) {
+          const { value, done } = await reader.read();
+          if (done) break;
+          buf += decoder.decode(value, { stream: true });
+
+          // SSE lines: "data: {...}" (xAI & OpenRouter) :contentReference[oaicite:2]{index=2}
+          const lines = buf.split(/\r?\n/);
+          buf = lines.pop() ?? "";
+          for (const raw of lines) {
+            const line = raw.trim();
+            if (!line.startsWith("data:")) continue;
+            const payload = line.slice(5).trim();
+            if (!payload) continue;
+            if (payload === "[DONE]") return;
+            try {
+              const json = JSON.parse(payload);
+              const delta =
+                json.choices?.[0]?.delta?.content ??
+                json.choices?.[0]?.message?.content ??
+                "";
+              if (delta) yield String(delta);
+            } catch {
+              // ignore malformed partials
+            }
+          }
+        }
+
+        // Flush a final complete event if it’s sitting in the buffer
+        const tail = buf.trim();
+        if (tail.startsWith("data:")) {
+          const payload = tail.slice(5).trim();
+          if (payload && payload !== "[DONE]") {
+            try {
+              const json = JSON.parse(payload);
+              const delta =
+                json.choices?.[0]?.delta?.content ??
+                json.choices?.[0]?.message?.content ??
+                "";
+              if (delta) yield String(delta);
+            } catch {}
+          }
+        }
+      })();
+    }
+
+    // NON-STREAMING
+    const doFetch = async () => {
+      const res = await fetch(this.endpoint(), {
+        method: "POST",
+        headers: this.headers(),
+        body: JSON.stringify(body),
+      });
+
+      if (!res.ok) {
+        const txt = await res.text().catch(() => "");
+        if (res.status === 404) {
+          throw new Error(
+            `Grok request failed: 404 Not Found\n` +
+            `Hint: if you're using xAI directly, the base URL must include /v1 (e.g., https://api.x.ai/v1). Response:\n${txt}`
+          );
+        }
+        throw new Error(`Grok request failed: ${res.status} ${res.statusText}\n${txt}`);
+      }
+
+      const json: any = await res.json();
+      const text =
+        json.choices?.[0]?.message?.content ??
+        json.choices?.[0]?.delta?.content ??
+        "";
+      const usage: UsageMeta | undefined = json.usage
+        ? {
+            inputTokens: json.usage.prompt_tokens,
+            outputTokens: json.usage.completion_tokens,
+            costUSD: json.usage.total_cost,
+            model: json.model,
+          }
+        : undefined;
+      return { text, usage };
+    };
+
+    return doFetch();
+  }
+}

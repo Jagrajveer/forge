@@ -1,103 +1,64 @@
-// src/config/env.ts
-import dotenv from "dotenv";
-import * as path from "node:path";
 import * as fs from "node:fs";
+import * as path from "node:path";
+import * as dotenv from "dotenv";
 
-/**
- * Load .env files robustly and expose normalized config.
- * - Searches from CWD up to filesystem root for `.env.local` then `.env`
- * - Later files override earlier ones (local wins)
- * - Falls back to dotenv.config() default resolution
- */
+type Boolish = boolean | undefined;
 
-function tryLoad(p: string, loaded: string[]) {
-  try {
+function loadEnvFiles(): string[] {
+  const loaded: string[] = [];
+  const cwd = process.cwd();
+  const candidates = [".env.local", ".env"];
+  for (const file of candidates) {
+    const p = path.join(cwd, file);
     if (fs.existsSync(p)) {
       dotenv.config({ path: p });
       loaded.push(p);
-    }
-  } catch {
-    // ignore file/read errors; diagnostics will show what we managed to load
-  }
-}
-
-function loadEnvSearch(): string[] {
-  const loaded: string[] = [];
-  let dir = process.cwd();
-  const seen = new Set<string>();
-
-  // Walk up to root, loading .env.local then .env at each level.
-  while (true) {
-    const local = path.join(dir, ".env.local");
-    const base = path.join(dir, ".env");
-    if (!seen.has(local)) {
-      tryLoad(local, loaded);
-      seen.add(local);
-    }
-    if (!seen.has(base)) {
-      tryLoad(base, loaded);
-      seen.add(base);
-    }
-    const parent = path.dirname(dir);
-    if (parent === dir) break;
-    dir = parent;
-  }
-
-  // Final fallback: default resolution (CWD)
-  if (loaded.length === 0) {
-    try {
-      dotenv.config();
-    } catch {
-      /* noop */
     }
   }
   return loaded;
 }
 
-export function normalizeXaiBaseUrl(input?: string): string {
-  const base = (input ?? "").replace(/\/+$/, "");
-  const stripped = base.replace(/\/v1(?:\/chat\/completions)?$/i, "");
-  return stripped || "https://api.x.ai";
+const LOADED_ENV_FILES = loadEnvFiles();
+
+export interface Env {
+  readonly GROK_API_KEY: string | undefined;
+  readonly GROK_MODEL_ID: string | undefined; // default in profile.ts
+  readonly GROK_BASE_URL: string | undefined;
+
+  readonly OPENROUTER_API_KEY: string | undefined;
+
+  readonly FORGE_PROVIDER: "xai" | "openrouter" | "mock" | undefined;
+
+  readonly FORGE_ALLOW_DANGEROUS: Boolish;
+  readonly FORGE_CMD_TIMEOUT_MS: number | undefined;
+  readonly FORGE_TOOL_STDIO_LIMIT: number | undefined;
+
+  readonly LOADED_ENV_FILES: string[];
 }
 
-const LOADED_ENV_FILES = loadEnvSearch();
+function toBool(v: string | undefined): boolean | undefined {
+  if (v === undefined) return undefined;
+  return ["1", "true", "yes", "on"].includes(v.toLowerCase());
+}
 
-const allowDangerous = /^true$/i.test(process.env.FORGE_ALLOW_DANGEROUS || "");
-const num = (v?: string) => {
-  const n = Number.parseInt(v ?? "");
+function toInt(v: string | undefined): number | undefined {
+  if (v === undefined || v === "") return undefined;
+  const n = Number(v);
   return Number.isFinite(n) ? n : undefined;
-};
+}
 
-export const ENV = {
-  // Auth (xAI primary; accept legacy GROK_* too)
-  XAI_API_KEY: process.env.XAI_API_KEY ?? process.env.GROK_API_KEY ?? undefined,
+export const env: Env = {
+  GROK_API_KEY: process.env.GROK_API_KEY ?? process.env.XAI_API_KEY, // tolerate legacy
+  GROK_MODEL_ID: process.env.GROK_MODEL_ID ?? "x-ai/grok-code-fast-1",
+  GROK_BASE_URL: process.env.GROK_BASE_URL, // if calling x.ai directly
 
-  // Network
-  XAI_BASE_URL: normalizeXaiBaseUrl(process.env.XAI_BASE_URL ?? process.env.GROK_BASE_URL),
-  XAI_MODEL: process.env.XAI_MODEL ?? process.env.GROK_MODEL ?? "grok-3",
+  OPENROUTER_API_KEY: process.env.OPENROUTER_API_KEY,
 
-  // Guardrails & limits
-  FORGE_ALLOW_DANGEROUS: allowDangerous,
-  FORGE_CMD_TIMEOUT_MS: num(process.env.FORGE_CMD_TIMEOUT_MS),
-  FORGE_TOOL_STDIO_LIMIT: num(process.env.FORGE_TOOL_STDIO_LIMIT),
+  FORGE_PROVIDER: (process.env.FORGE_PROVIDER as Env["FORGE_PROVIDER"]) ?? "openrouter",
 
-  // Debug
+  FORGE_ALLOW_DANGEROUS: toBool(process.env.FORGE_ALLOW_DANGEROUS),
+  FORGE_CMD_TIMEOUT_MS: toInt(process.env.FORGE_CMD_TIMEOUT_MS),
+  FORGE_TOOL_STDIO_LIMIT: toInt(process.env.FORGE_TOOL_STDIO_LIMIT),
+
   LOADED_ENV_FILES,
-} as const;
-
-/** Back-compat: keep older import style alive */
-export type Env = typeof ENV;
-export function getEnv(): Env {
-  return ENV;
-}
-
-/** Human-readable diagnostics for `forge env doctor` */
-export function envDiagnostics() {
-  return {
-    cwd: process.cwd(),
-    loadedEnvFiles: LOADED_ENV_FILES,
-    hasXaiApiKey: Boolean(ENV.XAI_API_KEY),
-    xaiBaseUrl: ENV.XAI_BASE_URL,
-    xaiModel: ENV.XAI_MODEL,
-  };
-}
+};
