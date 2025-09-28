@@ -34,7 +34,7 @@ verifyOpt(
       .description("interactive chat (agent can plan + act with approvals)")
       .option("--trace <level>", "reasoning visibility: none|plan|verbose", "plan")
       .option("--refresh", "legacy re-render mode", false)
-      .option("--no-exec", "parse but do not execute model actions", false)
+      .option("--no-exec", "parse but do not execute model actions")
   )
 ).action(async (opts) => {
   ensureConfigDir();
@@ -136,6 +136,7 @@ program
     ensureConfigDir();
     const dir = path.join(process.cwd(), ".forge");
     const mem = path.join(dir, "MEMORY.md");
+    if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
     if (!fs.existsSync(mem)) {
       fs.writeFileSync(
         mem,
@@ -149,7 +150,7 @@ program
 
 ## Tech & Style
 - Node 20+, TypeScript strict.
-- ESLint + Prettier enforced.
+- ESLint (flat config) + Prettier optional.
 
 ## Domain Notes
 - High-level architecture…
@@ -165,6 +166,87 @@ program
     } else {
       process.stdout.write(`already exists: ${mem}\n`);
     }
+  });
+
+/** lint helpers */
+const lintGroup = program.command("lint").description("ESLint helpers");
+
+// ESLint v9 flat config scaffold that:
+//  - uses global ignores for dist/ and node_modules/
+//  - applies JS recommended rules to JS files only
+//  - applies typed TS rules only to TS/TSX, with parserOptions.projectService
+lintGroup
+  .command("init")
+  .description("scaffold ESLint v9 flat config and add 'lint' npm script")
+  .action(async () => {
+    const cwd = process.cwd();
+    const eslintConfigPath = path.join(cwd, "eslint.config.js");
+
+    if (!fs.existsSync(eslintConfigPath)) {
+      const config = `// ESLint v9 flat config for Node + TypeScript
+// v9 uses \`eslint.config.js\` as default. Migration guide: https://eslint.org/docs/latest/use/migrate-to-9.0.0
+// Typed linting docs: https://typescript-eslint.io/getting-started/typed-linting/
+import js from "@eslint/js";
+import tseslint from "typescript-eslint";
+
+export default [
+  // Global ignores (must be a standalone object to act as global ignores)
+  { ignores: ["dist/**", "node_modules/**"] },
+
+  // JS rules for JS files only
+  { ...js.configs.recommended, files: ["**/*.{js,cjs,mjs}"] },
+
+  // Typed TS rules for TS/TSX only
+  ...tseslint.configs.recommendedTypeChecked,
+  {
+    files: ["**/*.{ts,tsx}"],
+    languageOptions: {
+      parserOptions: {
+        // Prefer projectService in typescript-eslint v8+, no need to list every tsconfig
+        // https://typescript-eslint.io/troubleshooting/typed-linting/
+        projectService: true
+      }
+    },
+    rules: {
+      // add project-specific TS rules here
+    }
+  }
+];
+`;
+      fs.writeFileSync(eslintConfigPath, config, "utf8");
+      process.stdout.write(`created ${eslintConfigPath}\n`);
+    } else {
+      process.stdout.write(`already exists: ${eslintConfigPath}\n`);
+    }
+
+    // Ensure package.json has a "lint" script
+    const pkgPath = path.join(cwd, "package.json");
+    if (fs.existsSync(pkgPath)) {
+      const pkg = JSON.parse(fs.readFileSync(pkgPath, "utf8"));
+      pkg.scripts ||= {};
+      if (!pkg.scripts.lint) {
+        // Limit extensions; flat config ignores dist via global ignores above
+        pkg.scripts.lint = "eslint . --ext .ts,.tsx,.js,.cjs,.mjs";
+        fs.writeFileSync(pkgPath, JSON.stringify(pkg, null, 2) + "\n", "utf8");
+        process.stdout.write(`added script "lint" to package.json\n`);
+      } else {
+        process.stdout.write(`script "lint" already present in package.json\n`);
+      }
+    } else {
+      process.stdout.write(`(note) package.json not found — skipped adding script.\n`);
+    }
+
+    process.stdout.write(
+      [
+        "",
+        "Next:",
+        "  npm i -D eslint @eslint/js typescript-eslint",
+        "",
+        "Run lint:",
+        "  npm run lint",
+        "",
+      ].join("\n")
+    );
   });
 
 /** status (git porcelain) */

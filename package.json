@@ -9,17 +9,21 @@
   "scripts": {
     "build": "tsc",
     "start": "node dist/cli.js",
-    "lint": "eslint . --ext .ts",
+    "lint": "eslint . --ext .ts,.tsx,.js,.cjs,.mjs",
     "test": "echo \"No tests yet\" && exit 0",
     "release": "npm publish"
   },
   "devDependencies": {
+    "@eslint/js": "^9.36.0",
     "@types/node": "^22.0.0",
     "@types/prompts": "^2.4.9",
-    "eslint": "^9.0.0",
+    "ajv": "^8.17.1",
+    "eslint": "^9.36.0",
     "prettier": "^3.3.0",
     "ts-node": "^10.9.2",
-    "typescript": "^5.4.0"
+    "typescript": "^5.4.0",
+    "typescript-eslint": "^8.44.1",
+    "vitest": "^3.2.4"
   },
   "dependencies": {
     "commander": "^12.1.0",

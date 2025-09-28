@@ -11,7 +11,6 @@ function isObviouslyDestructive(cmd: string): boolean {
     /curl\s+.*\|\s*sh/, /wget\s+.*\|\s*sh/
   ];
   if (bad.some(rx => rx.test(t))) return true;
-  // Multi-commands and pipes raise risk
   if (/[;&|]{1,2}/.test(t)) return true;
   return false;
 }
@@ -19,13 +18,19 @@ function isObviouslyDestructive(cmd: string): boolean {
 export function requiresApprovalForRun(cmd: string, level: ApprovalLevel): boolean {
   if (level === "auto") return false;
   if (level === "safe") return true;
-  // balanced: ask for destructive or multi-step
+  // balanced: destructive or multi-step commands require approval
   return isObviouslyDestructive(cmd);
 }
 
-export function requiresApprovalForWrite(level: ApprovalLevel): boolean {
+/**
+ * For writes we consider size:
+ *  - auto: never prompt
+ *  - safe: always prompt
+ *  - balanced: prompt for unknown size (patches) or > 8KB; otherwise auto-approve
+ */
+export function requiresApprovalForWrite(level: ApprovalLevel, sizeBytes?: number): boolean {
   if (level === "auto") return false;
   if (level === "safe") return true;
-  // balanced: ask for writes (edits are inherently risky)
-  return true;
+  if (sizeBytes == null) return true; // patches / unknown sizes
+  return sizeBytes > 8 * 1024;
 }
