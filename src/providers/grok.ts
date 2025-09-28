@@ -1,33 +1,22 @@
 /* Provider adapter for Grok via OpenRouter or direct x.ai */
 import { loadProfile } from "../config/profile.js";
+import type { LLM, ChatMessage, ChatOptions } from "./types.js";
+import type { UsageMeta } from "../core/usage.js";
 
-export interface UsageMeta {
-  inputTokens?: number;
-  outputTokens?: number;
-  costUSD?: number;
-  model?: string;
-}
-
-export interface LLM {
-  chat(
-    messages: Array<{ role: "system" | "user" | "assistant"; content: string }>,
-    options?: {
-      stream?: boolean;
-      maxTokens?: number;
-      temperature?: number;
-      reasoning?: boolean;
-    }
-  ): AsyncIterable<string> | Promise<{ text: string; usage?: UsageMeta }>;
-}
-
+/**
+ * Grok (xAI) / OpenRouter compatible provider.
+ * Uses OpenAI-style /v1/chat/completions with optional streaming (SSE).
+ */
 export class GrokProvider implements LLM {
   constructor(private cfg = loadProfile()) {}
 
   /** Ensure base URL matches provider expectations and includes version segment when needed. */
   private normalizedBaseUrl(): string {
-    let base = this.cfg.baseUrl ?? (this.cfg.provider === "openrouter"
-      ? "https://openrouter.ai/api/v1"
-      : "https://api.x.ai/v1");
+    let base =
+      this.cfg.baseUrl ??
+      (this.cfg.provider === "openrouter"
+        ? "https://openrouter.ai/api/v1"
+        : "https://api.x.ai/v1");
 
     // Trim trailing slashes
     base = base.replace(/\/+$/, "");
@@ -60,26 +49,33 @@ export class GrokProvider implements LLM {
     return h;
   }
 
-  chat(
-    messages: Array<{ role: "system" | "user" | "assistant"; content: string }>,
-    options: { stream?: boolean; maxTokens?: number; temperature?: number; reasoning?: boolean } = {}
-  ): AsyncIterable<string> | Promise<{ text: string; usage?: UsageMeta }> {
+  // === Overloads (must mirror the LLM interface) ===
+  public chat(messages: ChatMessage[], options: ChatOptions & { stream: true }): AsyncIterable<string>;
+  public chat(
+    messages: ChatMessage[],
+    options?: ChatOptions & { stream?: false }
+  ): Promise<{ text: string; usage?: UsageMeta }>;
+
+  // === Implementation (broad signature; explicit `any` return type to satisfy overload compatibility) ===
+  // See TS handbook: overload signatures appear above a single implementation; the implementation must be compatible with all overloads. :contentReference[oaicite:2]{index=2}
+  public chat(messages: ChatMessage[], options?: ChatOptions): any {
+    const stream = !!options?.stream;
+
     const body: any = {
       model: this.cfg.model, // normalized in profile loader
       messages,
-      stream: Boolean(options.stream),
-      temperature: options.temperature ?? 0.3,
-      max_tokens: options.maxTokens ?? 2048,
+      stream,
+      temperature: options?.temperature ?? 0.3,
+      max_tokens: options?.maxTokens ?? 2048,
     };
 
-    // xAI & OpenRouter both accept OpenAI-style Chat Completions; xAI streams via SSE, too. :contentReference[oaicite:1]{index=1}
-    if (options.reasoning) {
+    if (options?.reasoning) {
       // Best-effort hint; ignored by providers that don't use it.
       body.reasoning = { effort: "medium" };
     }
 
-    // STREAMING: return a true async generator (not a Promise)
-    if (body.stream) {
+    // STREAMING: return an async generator (AsyncIterable). MDN notes async generators conform to the async iterable protocol. :contentReference[oaicite:3]{index=3}
+    if (stream) {
       const self = this;
       return (async function* () {
         const res = await fetch(self.endpoint(), {
@@ -90,11 +86,10 @@ export class GrokProvider implements LLM {
 
         if (!res.ok) {
           const txt = await res.text().catch(() => "");
-          // Helpful tip for common misconfig: missing /v1 on xAI base
           if (res.status === 404) {
             throw new Error(
               `Grok request failed: 404 Not Found\n` +
-              `Hint: if you're using xAI directly, the base URL must include /v1 (e.g., https://api.x.ai/v1). Response:\n${txt}`
+                `Hint: if you're using xAI directly, the base URL must include /v1 (e.g., https://api.x.ai/v1). Response:\n${txt}`
             );
           }
           throw new Error(`Grok request failed: ${res.status} ${res.statusText}\n${txt}`);
@@ -111,7 +106,7 @@ export class GrokProvider implements LLM {
           if (done) break;
           buf += decoder.decode(value, { stream: true });
 
-          // SSE lines: "data: {...}" (xAI & OpenRouter) :contentReference[oaicite:2]{index=2}
+          // SSE lines: "data: {...}"
           const lines = buf.split(/\r?\n/);
           buf = lines.pop() ?? "";
           for (const raw of lines) {
@@ -145,13 +140,15 @@ export class GrokProvider implements LLM {
                 json.choices?.[0]?.message?.content ??
                 "";
               if (delta) yield String(delta);
-            } catch {}
+            } catch {
+              // ignore
+            }
           }
         }
       })();
     }
 
-    // NON-STREAMING
+    // NON-STREAMING: return a Promise<{ text, usage }>
     const doFetch = async () => {
       const res = await fetch(this.endpoint(), {
         method: "POST",
@@ -164,7 +161,7 @@ export class GrokProvider implements LLM {
         if (res.status === 404) {
           throw new Error(
             `Grok request failed: 404 Not Found\n` +
-            `Hint: if you're using xAI directly, the base URL must include /v1 (e.g., https://api.x.ai/v1). Response:\n${txt}`
+              `Hint: if you're using xAI directly, the base URL must include /v1 (e.g., https://api.x.ai/v1). Response:\n${txt}`
           );
         }
         throw new Error(`Grok request failed: ${res.status} ${res.statusText}\n${txt}`);
@@ -180,7 +177,7 @@ export class GrokProvider implements LLM {
             inputTokens: json.usage.prompt_tokens,
             outputTokens: json.usage.completion_tokens,
             costUSD: json.usage.total_cost,
-            model: json.model,
+            model: json.model, // optional, display only
           }
         : undefined;
       return { text, usage };

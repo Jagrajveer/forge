@@ -3,10 +3,12 @@ export type UsageMeta = {
   outputTokens?: number;
   totalTokens?: number;
   costUSD?: number;
+  /** Optional: provider/model id for display in the tokens panel */
+  model?: string;
 };
 
-const PRICE_PER_M_INPUT = 0.20; // xAI grok-code-fast-1 input $/M :contentReference[oaicite:2]{index=2}
-const PRICE_PER_M_OUTPUT = 1.50; // output $/M :contentReference[oaicite:3]{index=3}
+const PRICE_PER_M_INPUT = 0.20; // xAI grok-code-fast-1 input $/M
+const PRICE_PER_M_OUTPUT = 1.50; // output $/M
 
 export class UsageCounter {
   input = 0;
@@ -33,7 +35,7 @@ export class UsageCounter {
       inputTokens: this.input,
       outputTokens: this.output,
       totalTokens: total,
-      estCostUSD: Number(this.cost.toFixed(6))
+      estCostUSD: Number(this.cost.toFixed(6)),
     };
   }
 }

@@ -5,12 +5,23 @@ export interface ChatMessage {
   content: string | object;
 }
 
+export interface ChatOptions {
+  /** stream tokens as they arrive (SSE / chunked) */
+  stream?: boolean;
+  /** soft cap for provider */
+  maxTokens?: number;
+  /** sampling temperature */
+  temperature?: number;
+  /** hint that we want visible reasoning when available */
+  reasoning?: boolean;
+}
+
 export interface LLM {
   // Streaming overload
-  chat(messages: ChatMessage[], options: { stream: true }): AsyncIterable<string>;
+  chat(messages: ChatMessage[], options: ChatOptions & { stream: true }): AsyncIterable<string>;
   // Non-streaming overload (default)
   chat(
     messages: ChatMessage[],
-    options?: { stream?: false }
+    options?: ChatOptions & { stream?: false }
   ): Promise<{ text: string; usage?: UsageMeta }>;
 }
