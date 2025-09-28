@@ -1,50 +1,31 @@
-// src/core/safety.ts
-export type Mode = "safe" | "balanced" | "auto";
+export type ApprovalLevel = "safe" | "balanced" | "auto";
 
-export function isDestructiveCommand(cmd: string): boolean {
-  const dangerous = [
-    /\brm\s+-rf\b/i,
-    /\brmdir\s+/i,
-    /\bmkfs\b/i,
-    /\bdd\s+if=\//i,
-    /\bshutdown\b/i,
-    /\breboot\b/i,
-    /\bformat\b/i,
-    /:\(\)\s*\{\s*:\|\:\&\s*\};\s*:/, // fork bomb
-    /\bSet-Item\s+WSMan:/i,
-    /\bRemove-Item\b.*-Recurse\b.*-Force\b/i,
+function isObviouslyDestructive(cmd: string): boolean {
+  const t = cmd.replace(/\s+/g, " ").trim().toLowerCase();
+  const bad = [
+    /\brm\s+-rf\b/, /\brmdir\b/, /\bmkfs\b/, /\bdrop\s+database\b/,
+    /\bshutdown\b/, /\breboot\b/, /\bsystemctl\b/,
+    /\bnpm\s+publish\b/, /\byarn\s+publish\b/, /\bpnpm\s+publish\b/,
+    /\bgit\s+push\b/, /\bgit\s+reset\b/, /\bgit\s+rebase\b/,
+    /\bdocker\s+push\b/, /\bkubectl\s+apply\b/,
+    /curl\s+.*\|\s*sh/, /wget\s+.*\|\s*sh/
   ];
-  return dangerous.some((re) => re.test(cmd));
+  if (bad.some(rx => rx.test(t))) return true;
+  // Multi-commands and pipes raise risk
+  if (/[;&|]{1,2}/.test(t)) return true;
+  return false;
 }
 
-export function mutatesSystem(cmd: string): boolean {
-  const writers = [
-    /\bapt(-get)?\s+install\b/i,
-    /\byarn\s+add\b/i,
-    /\bnpm\s+(i|install|add)\b/i,
-    /\bbrew\s+install\b/i,
-    /\bcp\s+/i,
-    /\bmv\s+/i,
-    /\bchmod\b/i,
-    /\bchown\b/i,
-    /\bdocker\b.*\brun\b/i,
-  ];
-  return writers.some((re) => re.test(cmd));
+export function requiresApprovalForRun(cmd: string, level: ApprovalLevel): boolean {
+  if (level === "auto") return false;
+  if (level === "safe") return true;
+  // balanced: ask for destructive or multi-step
+  return isObviouslyDestructive(cmd);
 }
 
-function envAllowsDangerous(): boolean {
-  return /^true$/i.test(process.env.FORGE_ALLOW_DANGEROUS || "");
-}
-
-export function requiresApprovalForRun(cmd: string, mode: Mode): boolean {
-  if (envAllowsDangerous()) return false;
-  if (mode === "auto") return false;
-  if (mode === "safe") return true;
-  return isDestructiveCommand(cmd) || mutatesSystem(cmd);
-}
-
-export function requiresApprovalForWrite(mode: Mode): boolean {
-  if (envAllowsDangerous()) return false;
-  if (mode === "auto") return false;
+export function requiresApprovalForWrite(level: ApprovalLevel): boolean {
+  if (level === "auto") return false;
+  if (level === "safe") return true;
+  // balanced: ask for writes (edits are inherently risky)
   return true;
 }

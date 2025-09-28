@@ -14,7 +14,7 @@ export interface Profile {
   };
 }
 
-const CONFIG_DIR = path.join(process.cwd(), ".grokcli");
+const CONFIG_DIR = path.join(process.cwd(), ".forge");
 const CONFIG_PATH = path.join(CONFIG_DIR, "config.json");
 
 function readJsonIfExists<T>(p: string): Partial<T> {

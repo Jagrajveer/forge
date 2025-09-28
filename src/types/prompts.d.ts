@@ -12,16 +12,10 @@ declare module "prompts" {
 
   export type Prompt = <T extends string = string>(
     questions: PromptObject<T> | Array<PromptObject<T>>,
-    options?: {
-      onCancel?: () => void;
-      onSubmit?: (prompt: any, answer: any) => void;
-    }
+    options?: { onCancel?: () => void; onSubmit?: (prompt: any, answer: any) => void }
   ) => Promise<Record<T, any>>;
 
-  const prompts: Prompt & {
-    inject(values: any[]): void;
-    override(fn: (prompt: any, answer: any) => any): void;
-  };
+  const prompts: Prompt & { inject(values: any[]): void; override(fn: (prompt: any, answer: any) => any): void; };
 
   export default prompts;
 }

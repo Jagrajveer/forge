@@ -1,52 +1,63 @@
 import * as readline from "node:readline";
-import { Writable } from "node:stream";
 
-export type RenderMode = "append" | "refresh";
-
+/**
+ * Append-only writer for terminal output.
+ * Uses a TTY-only clearLine() so non-TTY streams (e.g., redirected to a file)
+ * won’t error.
+ */
 export class AppendOnlyStream {
-  constructor(private out: Writable = process.stdout) {}
+  constructor(private out: NodeJS.WriteStream = process.stdout) {}
 
-  write(token: string) {
-    // Only ever append. No carriage returns, no clearLine calls.
-    this.out.write(token);
+  write(s: string) {
+    this.out.write(s);
   }
 
   newline() {
     this.out.write("\n");
   }
+
+  clearLine() {
+    // Only attempt cursor ops on a TTY stream.
+    // process.stdout/process.stderr are tty.WriteStream instances when attached to a terminal.
+    if (!this.out.isTTY) return; // no-op if redirected. 
+    readline.clearLine(this.out, 0);
+    readline.cursorTo(this.out, 0);
+  }
 }
 
-export function renderPlan({
-  plan,
-  rationale,
-}: {
-  plan: string[];
-  rationale?: string;
-}) {
+export function renderPlan(input: { plan?: string[]; rationale?: string }) {
+  const { plan = [], rationale } = input;
   const lines: string[] = [];
-  if (plan?.length) {
-    lines.push("\n▶ Plan");
-    for (const step of plan) lines.push(`  • ${step}`);
+  if (plan.length) {
+    lines.push("▶ Plan");
+    for (const p of plan) lines.push(`  • ${p}`);
   }
   if (rationale) {
     lines.push("\n▶ Why");
     lines.push(`  ${rationale}`);
   }
-  return lines.join("\n") + "\n";
+  lines.push(""); // trailing newline
+  return lines.join("\n");
 }
 
-export function renderTokensPanel(usage?: {
+export function renderTokensPanel(usage: {
   inputTokens?: number;
   outputTokens?: number;
   costUSD?: number;
   model?: string;
 }) {
-  if (!usage) return "";
-  const parts = [
-    `model=${usage.model ?? "unknown"}`,
-    `in=${usage.inputTokens ?? 0}`,
-    `out=${usage.outputTokens ?? 0}`,
-    usage.costUSD !== undefined ? `cost=$${usage.costUSD.toFixed(6)}` : undefined,
-  ].filter(Boolean);
-  return `\n⏱️ Tokens: ${parts.join("  ")}\n`;
+  const it = usage.inputTokens ?? 0;
+  const ot = usage.outputTokens ?? 0;
+  const cost = usage.costUSD ?? 0;
+  const model = usage.model ?? "";
+  const total = it + ot;
+  return [
+    "\n",
+    "┌─ tokens ───────────────────────────────────────┐",
+    `│ model: ${model.padEnd(38)} │`,
+    `│ input: ${String(it).padStart(7)}  output: ${String(ot).padStart(7)}  total: ${String(total).padStart(7)} │`,
+    `│ est. cost: $${cost.toFixed(6).padStart(12)}                  │`,
+    "└───────────────────────────────────────────────┘",
+    "\n",
+  ].join("\n");
 }
