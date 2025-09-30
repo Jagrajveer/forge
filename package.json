@@ -4,14 +4,16 @@
   "description": "Forge CLI - AI coding assistant powered by xAI Grok",
   "type": "module",
   "bin": {
-    "forge": "dist/cli.js"
+    "forge": "bin/forge"
   },
   "scripts": {
     "build": "tsc",
     "start": "node dist/cli.js",
     "lint": "eslint . --ext .ts,.tsx,.js,.cjs,.mjs",
     "test": "echo \"No tests yet\" && exit 0",
-    "release": "npm publish"
+    "release": "npm publish",
+    "prepare": "npm run build",
+    "postbuild": "chmod +x dist/cli.js"
   },
   "devDependencies": {
     "@eslint/js": "^9.36.0",
