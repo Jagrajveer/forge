@@ -14,6 +14,8 @@ import { startThinkingAnimation, startProcessingAnimation, stopAnimation, succee
 import { registerAuthXaiCommands } from "./commands/auth-xai.js";
 import { registerPluginCommands } from "./commands/plugins.js";
 import { log, setLogLevel } from "./core/logger.js";
+import { bundleProject } from "./core/tools/bundle.js";
+import { createPullRequest } from "./core/tools/pr.js";
 
 const program = new Command();
 program.name("forge").description("Grok-powered engineering copilot");
@@ -167,6 +169,27 @@ program
     const llm = new GrokProvider();
     const md = await summarizeChangesWithModel(llm, { trace: opts.trace });
     process.stdout.write(md + "\n");
+  });
+
+  program
+  .command("bundle")
+  .description("Bundle project into a single labeled file")
+  .option("--out <file>", "Output file", "project_bundle.txt")
+  .action(async (opts) => {
+    const out = await bundleProject({ outFile: opts.out });
+    console.log(`\n✅ Bundle created at: ${out}\n`);
+  });
+
+  program
+  .command("pr")
+  .description("Create a GitHub pull request via gh")
+  .option("--title <title>", "PR title")
+  .option("--body <body>", "PR body", "Automated changes from forge")
+  .option("--draft", "Create as draft", false)
+  .action(async (opts) => {
+    const { url, stdout, stderr, code } = await createPullRequest({ title: opts.title, body: opts.body, draft: !!opts.draft });
+    if (code === 0) console.log(`\n✅ PR created: ${url}\n`);
+    else console.error(`\n❌ gh failed (${code})\n${stderr || stdout}`);
   });
 
 /** auth (xAI) */

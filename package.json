@@ -14,6 +14,7 @@
     "test:run": "vitest run",
     "test:coverage": "vitest run --coverage",
     "test:watch": "vitest --watch",
+    "repl": "node --experimental-repl-await --loader ts-node/esm scripts/repl.ts",
     "release": "npm publish"
   },
   "devDependencies": {
