@@ -13,6 +13,8 @@ import { renderTokensPanel, renderWelcomeBanner, renderUserPrompt, renderAssista
 import { startThinkingAnimation, startProcessingAnimation, stopAnimation, succeedAnimation, failAnimation } from "./ui/animations.js";
 import { registerAuthXaiCommands } from "./commands/auth-xai.js";
 import { registerPluginCommands } from "./commands/plugins.js";
+import { registerMemoryCommands } from "./commands/memory.js";
+import { registerSessionCommands } from "./commands/session.js";
 import { log, setLogLevel } from "./core/logger.js";
 import { bundleProject } from "./core/tools/bundle.js";
 import { createPullRequest } from "./core/tools/pr.js";
@@ -25,6 +27,7 @@ program
   .command("chat")
   .description("Interactive chat session with the model")
   .option("--trace <level>", "reasoning visibility: none|plan|verbose", "plan")
+  .option("--thinking <mode>", "off|summary|raw (maps to trace)", "summary")
   .option("--verify <mode>", "none|lint|test|both", "none")
   .option("--auto", "auto-approve tool actions", false)
   .option("--safe", "require approval for writes & commands", false)
@@ -40,8 +43,12 @@ program
     
     log.info("Starting interactive chat session", { options: opts });
     ensureConfigDir();
+    const thinkingEnv = process.env.FORGE_THINKING;
+    const thinking = (opts.thinking || thinkingEnv || "summary").toLowerCase();
+    const trace = thinking === "off" ? "none" : thinking === "raw" ? "verbose" : (opts.trace || "plan");
+
     const agent = new Agent({
-      trace: opts.trace,
+      trace,
       approvalLevel: opts.auto ? "auto" : opts.safe ? "safe" : "balanced",
       verifyMode: opts.verify,
       execute: true, // Enable execution by default
@@ -92,6 +99,7 @@ program
   .command("ask <prompt...>")
   .description("One-shot question (optionally verify after edits)")
   .option("--trace <level>", "reasoning visibility: none|plan|verbose", "plan")
+  .option("--thinking <mode>", "off|summary|raw (maps to trace)", "summary")
   .option("--verify <mode>", "none|lint|test|both", "none")
   .option("--auto", "auto-approve tool actions", false)
   .option("--safe", "require approval for writes & commands", false)
@@ -109,8 +117,12 @@ program
     log.info("Starting oneshot query", { prompt: prompt.slice(0, 100) + (prompt.length > 100 ? "..." : ""), options: opts });
     
     ensureConfigDir();
+    const thinkingEnv = process.env.FORGE_THINKING;
+    const thinking = (opts.thinking || thinkingEnv || "summary").toLowerCase();
+    const trace = thinking === "off" ? "none" : thinking === "raw" ? "verbose" : (opts.trace || "plan");
+
     const agent = new Agent({
-      trace: opts.trace,
+      trace,
       approvalLevel: opts.auto ? "auto" : opts.safe ? "safe" : "balanced",
       verifyMode: opts.verify,
       execute: true, // Enable execution by default
@@ -197,6 +209,12 @@ registerAuthXaiCommands(program);
 
 /** plugins */
 registerPluginCommands(program);
+
+/** memory */
+registerMemoryCommands(program);
+
+/** sessions */
+registerSessionCommands(program);
 
 /** parse CLI */
 program.parseAsync(process.argv).catch((err) => {

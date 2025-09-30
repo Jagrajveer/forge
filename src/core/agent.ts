@@ -3,7 +3,7 @@ import { systemPrompt } from "./prompts/system.js";
 import type { TraceLevel } from "./prompts/system.js";
 import { parseModelJSON } from "./contracts.js";
 import type { ModelJSONT } from "./contracts.js";
-import { AppendOnlyStream, renderPlan, renderUserPrompt, renderAssistantResponse, renderSeparator, renderTokensPanel, renderContextPanel } from "../ui/render.js";
+import { AppendOnlyStream, renderPlan, renderUserPrompt, renderAssistantResponse, renderSeparator, renderTokensPanel, renderContextPanel, startThinkingPanel, updateThinkingPanel, endThinkingPanel } from "../ui/render.js";
 import chalk from "chalk";
 import { startThinkingAnimation, startProcessingAnimation, stopAnimation, succeedAnimation, failAnimation } from "../ui/animations.js";
 import { summarizeChangesWithModel, summarizeCodebaseWithModel } from "./flows/summarize_changes.js";
@@ -153,8 +153,8 @@ export class Agent {
       let passesRemaining = 2;
 
       while (passesRemaining-- > 0) {
-        // Start thinking animation
-        startThinkingAnimation();
+        // Start thinking panel
+        startThinkingPanel(out, "Thinking…");
         
         let collected = "";
         let reasoning = "";
@@ -162,19 +162,20 @@ export class Agent {
           const maybeStream = this.llm.chat(messages, {
             stream: true,
             temperature: this.opts.temperature ?? 0.3,
-            reasoning: (this.opts.trace ?? "plan") !== "none",
+            reasoning: (this.opts.trace ?? "plan") === "verbose",
           }) as unknown;
 
           const stream = (await maybeStream) as AsyncIterable<{ content: string; reasoning?: string }>;
           
-          // Stop thinking animation and start processing
-          stopAnimation();
+          // collapse panel before processing spinner
+          endThinkingPanel(out);
           startProcessingAnimation();
           
           for await (const chunk of stream) {
             collected += chunk.content;
             if (chunk.reasoning) {
               reasoning = chunk.reasoning;
+              updateThinkingPanel(out, reasoning);
             }
           }
           
@@ -183,6 +184,7 @@ export class Agent {
           this.totalOutputTokens += Math.floor(collected.length / 4);
         } catch (err: any) {
           stopAnimation();
+          endThinkingPanel(out);
           const msg = err?.message || String(err);
           const observation = { title: "model stream error", body: msg } as Observation;
           out.write(`\n⚠️  Model stream failed: ${msg}\n`);
@@ -581,8 +583,8 @@ export class Agent {
       }
     }
 
-    // Start thinking animation
-    startThinkingAnimation();
+    // Start thinking panel
+    startThinkingPanel(out, "Thinking…");
     
     const sys = systemPrompt(this.opts.trace ?? "plan");
     const messages: ChatMessage[] = [
@@ -595,8 +597,8 @@ export class Agent {
       reasoning: (this.opts.trace ?? "plan") !== "none",
     })) as { text: string; usage?: any; reasoning?: string };
 
-    // Stop thinking animation
-    stopAnimation();
+    // End panel
+    endThinkingPanel(out);
     
     // Track actual usage from Grok API
     if (res.usage) {

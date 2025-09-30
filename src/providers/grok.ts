@@ -128,7 +128,9 @@ export class GrokProvider implements LLM {
               
               // Extract reasoning if available
               const reasoningDelta = 
+                json.choices?.[0]?.delta?.reasoning_content ??
                 json.choices?.[0]?.delta?.reasoning ??
+                json.choices?.[0]?.message?.reasoning_content ??
                 json.choices?.[0]?.message?.reasoning ??
                 "";
               
@@ -160,7 +162,9 @@ export class GrokProvider implements LLM {
                 json.choices?.[0]?.message?.content ??
                 "";
               const reasoningDelta = 
+                json.choices?.[0]?.delta?.reasoning_content ??
                 json.choices?.[0]?.delta?.reasoning ??
+                json.choices?.[0]?.message?.reasoning_content ??
                 json.choices?.[0]?.message?.reasoning ??
                 "";
               

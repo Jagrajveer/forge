@@ -27,6 +27,43 @@ export class AppendOnlyStream {
   }
 }
 
+// Ephemeral thinking panel state (track last lines per stream)
+const thinkingBuffers = new WeakMap<AppendOnlyStream, string[]>();
+
+function termWidth(out: NodeJS.WriteStream): number {
+  return out && (out as any).columns ? Math.max(20, (out as any).columns as number) : 80;
+}
+
+export function startThinkingPanel(out: AppendOnlyStream, label = "Thinking…"): void {
+  thinkingBuffers.set(out, []);
+  out.clearLine();
+  const line = chalk.gray(`💭 ${label}`);
+  out.write(line + "\n");
+}
+
+export function updateThinkingPanel(out: AppendOnlyStream, text: string): void {
+  const buf = thinkingBuffers.get(out) ?? [];
+  // Split into lines, keep last ~2 logical lines
+  const pieces = String(text).split(/\r?\n/).filter(Boolean);
+  for (const p of pieces) buf.push(p);
+  while (buf.length > 2) buf.shift();
+  thinkingBuffers.set(out, buf);
+
+  // render truncated to terminal width
+  const width = termWidth((out as any).out ?? process.stdout);
+  const rendered = buf
+    .map((l) => (l.length > width ? l.slice(0, width - 1) + "…" : l))
+    .join(" \u00B7 ");
+
+  out.clearLine();
+  out.write(chalk.gray(`💭 ${rendered}`) + "\n");
+}
+
+export function endThinkingPanel(out: AppendOnlyStream): void {
+  out.clearLine();
+  thinkingBuffers.delete(out);
+}
+
 export function renderPlan(input: { plan?: string[]; rationale?: string }) {
   const { plan = [], rationale } = input;
   const lines: string[] = [];

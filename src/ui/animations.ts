@@ -101,3 +101,16 @@ export function warnAnimation(text: string) {
 export function infoAnimation(text: string) {
   animationManager.info(text);
 }
+
+// Extended named helpers for specific phases
+export function startVerifyingAnimation() {
+  animationManager.startSpinner("🔎 Verifying...", "dots");
+}
+
+export function startApplyPatchAnimation() {
+  animationManager.startSpinner("🩹 Applying patch...", "dots");
+}
+
+export function startRunTestsAnimation() {
+  animationManager.startSpinner("🧪 Running tests...", "dots");
+}

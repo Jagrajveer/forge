@@ -1,0 +1,93 @@
+---
+description: "Forge CLI ↔ xAI Grok: context+tokens under input, dynamic reasoning stream, and durable memory (sessions + xAI Responses API)."
+globs:
+  - "**/*"
+alwaysApply: true
+---
+
+# Identity
+- You are working **inside this monorepo** (Node 20+, TypeScript). Your job is to make the CLI behave like Claude Code: **plan → act → verify**, with a dynamic UI that shows context usage, token costs, and (optionally) Grok’s reasoning stream.
+
+# What we know about Grok (source-of-truth)
+- **Streaming:** xAI supports **SSE streaming**; deltas arrive as `chunk.choices[0].delta.*`. Use this for live output. :contentReference[oaicite:0]{index=0}
+- **Reasoning trace:** Certain Grok models expose raw thinking in `reasoning_content`. The docs note: you can access *the model’s thoughts* via `message.reasoning_content`; **however, `grok-4` does not return `reasoning_content`**. For coding, `grok-code-fast-1` exposes reasoning via **streaming** `chunk.choices[0].delta.reasoning_content`. :contentReference[oaicite:1]{index=1}
+- **Models / context:** Grok 4 Fast SKUs (reasoning & non-reasoning) show **2M token** context window and OpenAI/Anthropic-compatible surface. :contentReference[oaicite:2]{index=2}
+- **Usage / tokens:** Responses include a **usage** object with prompt & completion tokens; **reasoning tokens** may be counted **separately** from completion tokens and still contribute to **total_tokens**. (Add them when present.) :contentReference[oaicite:3]{index=3}
+- **Stateless vs stateful:** Regular **Chat** is stateless (you send history each time). The **Responses API** provides **stateful server-side conversations** you can chain by `response_id`. :contentReference[oaicite:4]{index=4}
+
+# Output Contract (always follow)
+1) **Plan** (3–7 bullets).  
+2) **Edits (unified diff)** – minimal, auditable.  
+3) **Full Files (post-edit)** – print the *entire* content for each changed/new file.  
+4) **Commands to run** – lint/test/build + demo.  
+5) **Follow-ups** – tight TODOs.  
+> Never omit **Full Files**.
+
+# Feature goals (acceptance criteria)
+
+## A) Show context & tokens *under the input field*
+- Under the input prompt area, render a compact status line:
+  - `Context: <used>/<modelMax>` | `Prompt: <usage.prompt_tokens>` | `Output: <usage.completion_tokens>` | `Reasoning: <usage.completion_tokens_details.reasoning_tokens or 0>` | `Total: <usage.total_tokens>` | `Model: <id>`
+- Update live while streaming (increment output & reasoning counts from SSE deltas when possible).  
+- Use model max from discovery (e.g., **2,000,000** for Grok 4 Fast) and **warn at 75%**. :contentReference[oaicite:5]{index=5}
+- If the provider doesn’t return `completion_tokens_details`, compute running totals client-side; **remember xAI may report reasoning tokens separately**—add them to show real totals. :contentReference[oaicite:6]{index=6}
+
+## B) Dynamic “thinking” panel (toggle)
+- Add `--thinking off|summary|raw` (env: `FORGE_THINKING`).
+  - **off:** no panel.  
+  - **summary:** short bullet summary (safe default).  
+  - **raw:** stream **`reasoning_content`** as it arrives. If the model doesn’t expose it (e.g., `grok-4`), downgrade to **summary** automatically.
+- Implementation notes:
+  - For **coding model** `grok-code-fast-1`, consume **SSE** and read `chunk.choices[0].delta.reasoning_content` to stream actual thinking. :contentReference[oaicite:7]{index=7}
+  - For models that *don’t* return `reasoning_content`, show a concise, generated plan trace (no hidden chain-of-thought) and final rationale.
+  - Provide a one-line privacy note when `raw` is enabled (may contain sensitive intermediate thoughts; costs count as reasoning tokens). :contentReference[oaicite:8]{index=8}
+
+## C) Memory (better retention + resumable sessions)
+- **Local sessions** (client-side): keep `.forge/sessions/*.jsonl` append-only chat logs with rolling **auto-summarization** once size nears model context (keep the last K full turns; summarize older turns). Include an index file with title, first/last timestamps, model, and token footprint.
+- **xAI Responses API sessions** (server-side): add commands to **create, append, retrieve, delete** a stateful response using `/v1/responses` and chaining by `id`. Note: history is stored by xAI; you’re billed for the entire chain (with potential cached prompt credits). :contentReference[oaicite:9]{index=9}
+- CLI commands:
+  - `forge session list|show|resume <session>` (local JSONL)
+  - `forge xai start|append|get|delete <response_id>` (Responses API)
+- **Context hygiene:** Before each request, compute context budget from model’s max (e.g., 2M); if over budget, summarize oldest turns and persist the summary back into the session.
+
+## D) UX polish
+- Use **SSE spinners** (ora + cli-spinners) for `thinking`, `verifying`, `patching`, `testing`. Keep ANSI off in non-TTY. (xAI recommends streaming for UX.) :contentReference[oaicite:10]{index=10}
+- Print a small **cost line** after each run using usage fields (and any reasoning deltas), matching the status bar numbers. :contentReference[oaicite:11]{index=11}
+
+# Editing rules
+- TypeScript strict, ESM imports.  
+- Small diffs; upgrade only minimal deps (`ora`, `cli-spinners`).  
+- Respect safety: `thinking:raw` is opt-in; default to `summary`.
+
+# Implementation checklist (what to build)
+1) **UI**
+   - `src/ui/render.ts`: add `renderContextBar(usage, modelMax, liveCounters)` and `renderThinkingPanel(mode)`.
+   - Live counters: update from SSE chunks (increment completion and reasoning token counters as text/reasoning deltas arrive).
+2) **Streaming**
+   - If response streaming is enabled, parse SSE events:
+     - Text chunks: `chunk.choices[0].delta.content`
+     - **Reasoning** chunks (when supported): `chunk.choices[0].delta.reasoning_content`
+   - Collapse the thinking panel at end of stream. :contentReference[oaicite:12]{index=12}
+3) **Token & context accounting**
+   - Use API `usage` when present; otherwise estimate via local tokenizer and reconcile when final usage arrives. (xAI exposes a **Tokenize text** endpoint if needed.) :contentReference[oaicite:13]{index=13}
+   - Add reasoning tokens to totals when `completion_tokens_details.reasoning_tokens` is present (xAI may report them separately). :contentReference[oaicite:14]{index=14}
+4) **Memory**
+   - Local: `.forge/sessions/*.jsonl` with summaries to stay under context window (2M on Grok 4 Fast). :contentReference[oaicite:15]{index=15}
+   - Server-side: `/v1/responses` flow for start/append/get/delete. :contentReference[oaicite:16]{index=16}
+5) **CLI flags**
+   - `--thinking off|summary|raw`  
+   - `--xai-session <response_id>` (use stateful Responses API)  
+   - `--model <id>` (e.g., `grok-4-fast-reasoning` for 2M ctx, or `grok-code-fast-1` for tool-heavy coding + reasoning stream). :contentReference[oaicite:17]{index=17}
+
+# Example reply template (use this when proposing diffs)
+## Plan
+- …
+
+## Edits (unified diff)
+```diff
+*** Begin Patch
+--- a/src/ui/render.ts
++++ b/src/ui/render.ts
+@@
++// add context bar + thinking panel with SSE hooks…
+*** End Patch
