@@ -3,9 +3,10 @@ import { systemPrompt } from "./prompts/system.js";
 import type { TraceLevel } from "./prompts/system.js";
 import { parseModelJSON } from "./contracts.js";
 import type { ModelJSONT } from "./contracts.js";
-import { AppendOnlyStream, renderPlan, renderUserPrompt, renderAssistantResponse, renderSeparator, renderTokensPanel, renderContextPanel, startThinkingPanel, updateThinkingPanel, endThinkingPanel } from "../ui/render.js";
+import { AppendOnlyStream, renderPlan, renderUserPrompt, renderAssistantResponse, renderSeparator, renderTokensPanel, renderContextPanel, startThinkingPanel, updateThinkingPanel, endThinkingPanel, renderContextBar } from "../ui/render.js";
 import chalk from "chalk";
-import { startThinkingAnimation, startProcessingAnimation, stopAnimation, succeedAnimation, failAnimation } from "../ui/animations.js";
+import { startThinkingAnimation, startProcessingAnimation, stopAnimation, succeedAnimation, failAnimation, startThinkingPulse, startLightning } from "../ui/animations.js";
+import { appendMemory } from "../state/memory.js";
 import { summarizeChangesWithModel, summarizeCodebaseWithModel } from "./flows/summarize_changes.js";
 import { planOnly } from "./flows/plan_only.js";
 import { executeTool } from "./tools/registry.js";
@@ -45,6 +46,8 @@ export class Agent {
   private totalOutputTokens = 0;
   private totalCostUSD = 0;
   private currentModel = "";
+  private liveCompletionTokens = 0;
+  private liveReasoningTokens = 0;
   
   constructor(private opts: AgentOptions = {}) {
     // Initialize session logging if enabled
@@ -153,8 +156,9 @@ export class Agent {
       let passesRemaining = 2;
 
       while (passesRemaining-- > 0) {
-        // Start thinking panel
+        // Start thinking panel + pulse
         startThinkingPanel(out, "Thinking…");
+        startThinkingPulse();
         
         let collected = "";
         let reasoning = "";
@@ -171,19 +175,37 @@ export class Agent {
           endThinkingPanel(out);
           startProcessingAnimation();
           
+          this.liveCompletionTokens = 0;
+          this.liveReasoningTokens = 0;
           for await (const chunk of stream) {
             collected += chunk.content;
             if (chunk.reasoning) {
               reasoning = chunk.reasoning;
               updateThinkingPanel(out, reasoning);
             }
+            // Increment approximate counters by characters/4
+            if (chunk.content) this.liveCompletionTokens += Math.floor(String(chunk.content).length / 4);
+            if (chunk.reasoning) this.liveReasoningTokens += Math.floor(String(chunk.reasoning).length / 4);
+            // Render a compact status line under the input
+            const bar = renderContextBar(
+              {
+                promptTokens: Math.floor(messages.map(m => String(m.content).length).reduce((a,b)=>a+b,0)/4),
+                completionTokens: this.liveCompletionTokens,
+                reasoningTokens: this.liveReasoningTokens,
+                totalTokens: this.liveCompletionTokens + this.liveReasoningTokens + Math.floor(messages.map(m => String(m.content).length).reduce((a,b)=>a+b,0)/4),
+                modelId: this.currentModel,
+              },
+              2_000_000,
+            );
+            out.clearLine();
+            out.write(bar + "\n");
           }
           
           // Estimate tokens for streaming (approximate)
           this.totalInputTokens += Math.floor(messages.map(m => String(m.content).length).reduce((a, b) => a + b, 0) / 4);
           this.totalOutputTokens += Math.floor(collected.length / 4);
         } catch (err: any) {
-          stopAnimation();
+        stopAnimation();
           endThinkingPanel(out);
           const msg = err?.message || String(err);
           const observation = { title: "model stream error", body: msg } as Observation;
@@ -528,6 +550,10 @@ export class Agent {
             ...messages,
             { role: "assistant", content: `OBSERVATIONS:\n\n${obsMd}` },
           ];
+          // Persist a concise memory line for high-level traceability
+          try {
+            appendMemory(`Turn observations: ${observations.map(o=>o.title).join(', ')}`);
+          } catch {}
           // Show enhanced context panel after observations
           this.showContextPanel(out);
           continue;

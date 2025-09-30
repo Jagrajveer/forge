@@ -1,0 +1,40 @@
+---
+description: "Forge CLI chat: Grok-only, color-coded output, compact under-input status bar, slash commands, code completion/suggestions."
+globs:
+  - "**/*"
+alwaysApply: true
+---
+
+# Identity & Provider (Grok only)
+- You are working inside this repo (Node 20+, TypeScript strict).
+- Use **xAI Grok** models exclusively. Default:
+  - **grok-code-fast-1** for coding/completion (256k ctx, fast, exposes reasoning trace in streaming). :contentReference[oaicite:1]{index=1}
+- Enable **SSE streaming**; consume `delta.content` and, when available, **`delta.reasoning_content`** to show live thinking. :contentReference[oaicite:2]{index=2}
+- Display **usage tokens** from API `usage` object (prompt, completion, total; include reasoning tokens if provided). :contentReference[oaicite:3]{index=3}
+
+# Output Contract (when you make edits)
+1) **Plan** (3–7 bullets).  
+2) **Edits (unified diff)** – minimal, auditable.  
+3) **Full Files (post-edit)** – print the entire content for every changed/new file.  
+4) **Commands to run** – lint/test/build + how to demo.  
+5) **Follow-ups** – short TODOs.  
+> Never omit **Full Files**.
+
+# UI Spec — Colors, Status Bar, Thinking
+## A. Color system (via Chalk)
+- Use **chalk** (Truecolor capable) for consistent cross-platform colors. :contentReference[oaicite:4]{index=4}
+- Map:
+  - **Prompt/labels**: `dim` gray.
+  - **Commands** (program): bright **green** (`git`, `npm`, `forge`, etc.).
+  - **Args/flags**: **white**.
+  - **Paths**: **blue**.
+  - **Success**: **green** "✔".
+  - **Warn**: **yellow** "▲".
+  - **Error**: **red** "✖".
+  - **Code blocks**: header line **magenta**; inline code **cyan**.
+  - **Thinking** (reasoning stream): **italic dim yellow**; collapse when complete.
+- Prefer **subtle emojis**; **avoid** verbose prefixes like `🌿 git commit: created`.
+
+## B. Under-input Status Bar (single line, no boxes)
+Immediately **under the input field**, render and live-update (while streaming):
+

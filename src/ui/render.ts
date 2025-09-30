@@ -64,6 +64,29 @@ export function endThinkingPanel(out: AppendOnlyStream): void {
   thinkingBuffers.delete(out);
 }
 
+export function renderContextBar(
+  usage: {
+    promptTokens?: number;
+    completionTokens?: number;
+    reasoningTokens?: number;
+    totalTokens?: number;
+    modelId?: string;
+  },
+  modelMax: number,
+): string {
+  const used = (usage.promptTokens ?? 0) + (usage.completionTokens ?? 0) + (usage.reasoningTokens ?? 0);
+  const total = usage.totalTokens ?? used;
+  const pct = modelMax > 0 ? Math.round((used / modelMax) * 100) : 0;
+  const warn = pct >= 75;
+  const label = warn ? chalk.yellow(`Context: ${used}/${modelMax} (${pct}%)`) : chalk.gray(`Context: ${used}/${modelMax} (${pct}%)`);
+  const prompt = chalk.gray(` | Prompt: ${usage.promptTokens ?? 0}`);
+  const out = chalk.gray(` | Output: ${usage.completionTokens ?? 0}`);
+  const rsn = chalk.gray(` | Reasoning: ${usage.reasoningTokens ?? 0}`);
+  const ttl = chalk.gray(` | Total: ${total}`);
+  const model = usage.modelId ? chalk.gray(` | Model: ${usage.modelId}`) : "";
+  return `${label}${prompt}${out}${rsn}${ttl}${model}`;
+}
+
 export function renderPlan(input: { plan?: string[]; rationale?: string }) {
   const { plan = [], rationale } = input;
   const lines: string[] = [];

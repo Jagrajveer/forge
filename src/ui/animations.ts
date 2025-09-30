@@ -114,3 +114,12 @@ export function startApplyPatchAnimation() {
 export function startRunTestsAnimation() {
   animationManager.startSpinner("🧪 Running tests...", "dots");
 }
+
+// Fancy animations
+export function startThinkingPulse() {
+  animationManager.startSpinner("💭 Thinking...", "dots2");
+}
+
+export function startLightning() {
+  animationManager.startSpinner("⚡⚡⚡", "line" as any);
+}

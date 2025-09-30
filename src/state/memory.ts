@@ -27,3 +27,10 @@ export function loadMemory(): string | undefined {
 export function memoryPath(): string {
   return MEMORY_PATH;
 }
+
+/** Append a structured memory line. */
+export function appendMemory(note: string) {
+  ensureConfigDir();
+  const line = `- ${new Date().toISOString()} ${note}\n`;
+  fs.appendFileSync(MEMORY_PATH, line, "utf8");
+}
