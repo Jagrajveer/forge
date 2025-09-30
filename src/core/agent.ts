@@ -4,6 +4,7 @@ import type { TraceLevel } from "./prompts/system.js";
 import { parseModelJSON } from "./contracts.js";
 import type { ModelJSONT } from "./contracts.js";
 import { AppendOnlyStream, renderPlan, renderUserPrompt, renderAssistantResponse, renderSeparator, renderTokensPanel, renderContextPanel } from "../ui/render.js";
+import chalk from "chalk";
 import { startThinkingAnimation, startProcessingAnimation, stopAnimation, succeedAnimation, failAnimation } from "../ui/animations.js";
 import { summarizeChangesWithModel, summarizeCodebaseWithModel } from "./flows/summarize_changes.js";
 import { planOnly } from "./flows/plan_only.js";
@@ -40,6 +41,10 @@ export class Agent {
   private sessionLog?: SessionLog;
   private filesReadCount = 0;
   private bytesReadCount = 0;
+  private totalInputTokens = 0;
+  private totalOutputTokens = 0;
+  private totalCostUSD = 0;
+  private currentModel = "";
   
   constructor(private opts: AgentOptions = {}) {
     // Initialize session logging if enabled
@@ -87,6 +92,30 @@ export class Agent {
 
   getSessionLogPath(): string | undefined {
     return this.sessionLog?.path();
+  }
+
+  private showContextPanel(out: AppendOnlyStream) {
+    const totalTokens = this.totalInputTokens + this.totalOutputTokens;
+    const contextTokens = Math.floor(this.bytesReadCount / 4); // rough estimate
+    const contextPercentage = totalTokens > 0 ? Math.round((contextTokens / totalTokens) * 100) : 0;
+    
+    out.write(renderContextPanel({
+      filesRead: this.filesReadCount,
+      bytesRead: this.bytesReadCount,
+      approxTokens: contextTokens,
+    }));
+    
+    // Show actual token usage from Grok API
+    if (totalTokens > 0) {
+      out.write(renderTokensPanel({
+        inputTokens: this.totalInputTokens,
+        outputTokens: this.totalOutputTokens,
+        costUSD: this.totalCostUSD,
+        model: this.currentModel,
+      }));
+      
+      out.write(chalk.gray(`Context usage: ${contextPercentage}% of total tokens\n\n`));
+    }
   }
 
   async chatInteractive(getUserInput: () => Promise<string>) {
@@ -148,6 +177,10 @@ export class Agent {
               reasoning = chunk.reasoning;
             }
           }
+          
+          // Estimate tokens for streaming (approximate)
+          this.totalInputTokens += Math.floor(messages.map(m => String(m.content).length).reduce((a, b) => a + b, 0) / 4);
+          this.totalOutputTokens += Math.floor(collected.length / 4);
         } catch (err: any) {
           stopAnimation();
           const msg = err?.message || String(err);
@@ -493,14 +526,16 @@ export class Agent {
             ...messages,
             { role: "assistant", content: `OBSERVATIONS:\n\n${obsMd}` },
           ];
-          // Show context panel after observations
-          const approxTokens = Math.floor(this.bytesReadCount / 4);
-          out.write(renderContextPanel({ filesRead: this.filesReadCount, bytesRead: this.bytesReadCount, approxTokens }));
+          // Show enhanced context panel after observations
+          this.showContextPanel(out);
           continue;
         }
 
         break;
       }
+
+      // Show context panel at end of turn
+      this.showContextPanel(out);
 
       if (inferSummarizeIntent(user)) {
         // Check if this is a codebase summary (not just changes)
@@ -562,11 +597,19 @@ export class Agent {
 
     // Stop thinking animation
     stopAnimation();
+    
+    // Track actual usage from Grok API
+    if (res.usage) {
+      this.totalInputTokens += res.usage.inputTokens || 0;
+      this.totalOutputTokens += res.usage.outputTokens || 0;
+      this.totalCostUSD += res.usage.costUSD || 0;
+      this.currentModel = res.usage.model || this.currentModel;
+    }
 
     this.logAssistantResponse(res.text);
     
     // Display thinking/reasoning if available and trace level allows it
-    if (res.reasoning && (this.opts.trace ?? "plan") !== "none") {
+    if (res.reasoning && (this.opts.trace ?? "plan") === "verbose") {
       out.write(renderSeparator() + "\n");
       out.write("💭 Thinking:\n");
       out.write("```\n" + res.reasoning + "\n```\n");
@@ -574,6 +617,9 @@ export class Agent {
     }
     
     out.write(renderAssistantResponse(res.text));
+    
+    // Show context panel at end
+    this.showContextPanel(out);
 
     if (inferSummarizeIntent(prompt)) {
       // Check if this is a codebase summary (not just changes)
