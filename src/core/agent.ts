@@ -3,8 +3,10 @@ import { systemPrompt } from "./prompts/system.js";
 import type { TraceLevel } from "./prompts/system.js";
 import { parseModelJSON } from "./contracts.js";
 import type { ModelJSONT } from "./contracts.js";
-import { AppendOnlyStream, renderPlan } from "../ui/render.js";
+import { AppendOnlyStream, renderPlan, renderUserPrompt, renderAssistantResponse, renderSeparator } from "../ui/render.js";
+import { startThinkingAnimation, startProcessingAnimation, stopAnimation, succeedAnimation, failAnimation } from "../ui/animations.js";
 import { summarizeChangesWithModel, summarizeCodebaseWithModel } from "./flows/summarize_changes.js";
+import { planOnly } from "./flows/plan_only.js";
 import { executeTool } from "./tools/registry.js";
 import {
   requiresApprovalForRun,
@@ -26,6 +28,7 @@ export interface AgentOptions {
   approvalLevel?: ApprovalLevel; // safe | balanced | auto
   verifyMode?: VerifyMode; // none | lint | test | both
   sessionLogging?: boolean; // enable/disable session logging
+  planFirst?: boolean; // plan → confirm → execute
 }
 
 type Observation = { title: string; body: string };
@@ -89,9 +92,19 @@ export class Agent {
 
     while (true) {
       const user = await getUserInput();
-      if (!user || user.trim().toLowerCase() === "/exit") break;
+      if (!user || user.trim().toLowerCase() === "/exit") {
+        if (user?.trim().toLowerCase() === "/exit") {
+          out.write(renderSeparator() + "\n");
+          out.write("👋 Goodbye! Thanks for using Forge CLI.\n");
+          out.write(renderSeparator() + "\n");
+        }
+        break;
+      }
       
       this.logUserInput(user);
+      
+      // Display user input with enhanced formatting
+      out.write(renderUserPrompt(user));
 
       const sys = systemPrompt(this.opts.trace ?? "plan");
       const baseMessages: ChatMessage[] = [
@@ -103,6 +116,9 @@ export class Agent {
       let passesRemaining = 2;
 
       while (passesRemaining-- > 0) {
+        // Start thinking animation
+        startThinkingAnimation();
+        
         const maybeStream = this.llm.chat(messages, {
           stream: true,
           temperature: this.opts.temperature ?? 0.3,
@@ -112,12 +128,20 @@ export class Agent {
         const stream = (await maybeStream) as AsyncIterable<{ content: string; reasoning?: string }>;
         let collected = "";
         let reasoning = "";
+        
+        // Stop thinking animation and start processing
+        stopAnimation();
+        startProcessingAnimation();
+        
         for await (const chunk of stream) {
           collected += chunk.content;
           if (chunk.reasoning) {
             reasoning = chunk.reasoning;
           }
         }
+        
+        // Stop processing animation
+        stopAnimation();
 
         let parsed: ModelJSONT | undefined;
         try {
@@ -126,8 +150,10 @@ export class Agent {
 
         // Display thinking/reasoning if available and trace level allows it
         if (reasoning && (this.opts.trace ?? "plan") !== "none") {
-          out.write("\n💭 Thinking:\n");
+          out.write("\n" + renderSeparator() + "\n");
+          out.write("💭 Thinking:\n");
           out.write("```\n" + reasoning + "\n```\n");
+          out.write(renderSeparator() + "\n");
         }
 
         // For summary tasks, don't show raw plan/rationale - process intelligently
@@ -139,8 +165,7 @@ export class Agent {
           } else {
             // Model didn't send contract JSON — show whatever text it sent.
             if (collected.trim()) {
-              out.write(collected);
-              out.newline();
+              out.write(renderAssistantResponse(collected));
               this.logAssistantResponse(collected);
             }
           }
@@ -152,8 +177,7 @@ export class Agent {
           } else {
             // Model didn't send contract JSON — show whatever text it sent.
             if (collected.trim()) {
-              out.write(collected);
-              out.newline();
+              out.write(renderAssistantResponse(collected));
               this.logAssistantResponse(collected);
             }
           }
@@ -482,6 +506,24 @@ export class Agent {
   async oneshot(prompt: string) {
     this.logUserInput(prompt);
     
+    // Display user input with enhanced formatting
+    const out = new AppendOnlyStream();
+    out.write(renderUserPrompt(prompt));
+    
+    // If plan-first mode, propose plan and confirm before execution
+    if (this.opts.planFirst) {
+      const plan = await planOnly(this.llm as any, prompt, { trace: this.opts.trace });
+      out.write(renderPlan({ plan: plan.plan, rationale: plan.rationale }));
+      const ok = await confirmYN("Proceed to execute this plan?", false);
+      if (!ok) {
+        out.write("🚫 Cancelled by user.\n");
+        return;
+      }
+    }
+
+    // Start thinking animation
+    startThinkingAnimation();
+    
     const sys = systemPrompt(this.opts.trace ?? "plan");
     const messages: ChatMessage[] = [
       { role: "system", content: sys },
@@ -493,18 +535,20 @@ export class Agent {
       reasoning: (this.opts.trace ?? "plan") !== "none",
     })) as { text: string; usage?: any; reasoning?: string };
 
-    this.logAssistantResponse(res.text);
+    // Stop thinking animation
+    stopAnimation();
 
-    const out = new AppendOnlyStream();
+    this.logAssistantResponse(res.text);
     
     // Display thinking/reasoning if available and trace level allows it
     if (res.reasoning && (this.opts.trace ?? "plan") !== "none") {
+      out.write(renderSeparator() + "\n");
       out.write("💭 Thinking:\n");
       out.write("```\n" + res.reasoning + "\n```\n");
+      out.write(renderSeparator() + "\n");
     }
     
-    out.write(res.text);
-    out.newline();
+    out.write(renderAssistantResponse(res.text));
 
     if (inferSummarizeIntent(prompt)) {
       // Check if this is a codebase summary (not just changes)

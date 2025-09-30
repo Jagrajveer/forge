@@ -12,7 +12,6 @@ dist
 dist-ssr
 *.local
 .forge
-scripts
 
 # Editor directories and files
 .vscode/*

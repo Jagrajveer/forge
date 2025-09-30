@@ -182,7 +182,8 @@ export class Validator {
 export const Patterns = {
   branchName: /^[a-zA-Z0-9._/-]+$/,
   fileName: /^[a-zA-Z0-9._-]+$/,
-  commitMessage: /^[^\x00-\x1F\x7F]+$/, // No control characters
+  // Allow printable ASCII plus CR/LF for multiline messages. Disallow other control chars (incl. TAB)
+  commitMessage: /^[\x20-\x7E\r\n]+$/,
   apiKey: /^[a-zA-Z0-9_-]+$/,
   url: /^https?:\/\/.+/,
 } as const;

@@ -66,7 +66,11 @@ export async function gitCreateBranch(name: string, cwd: string = process.cwd())
 /** Add all & commit with message (Conventional Commits encouraged) */
 export async function gitCommit(message: string, cwd: string = process.cwd()) {
   try {
-    validateCommitMessage(message);
+    // Sanitize and validate: allow CR/LF, strip other control chars
+    const sanitized = (message || "")
+      .replace(/[\t\v\f\x00-\x08\x0B\x0C\x0E-\x1F\x7F]/g, "")
+      .trim();
+    validateCommitMessage(sanitized);
     
     const addResult = await runCommand("git", { cwd, args: ["add", "-A"] });
     if (addResult.code !== 0) {
@@ -78,17 +82,21 @@ export async function gitCommit(message: string, cwd: string = process.cwd()) {
       );
     }
     
-    const commitResult = await runCommand("git", { 
-      cwd, 
-      args: ["commit", "-m", message] 
-    });
+    // Support subject + body (split on first blank line or first newline)
+    const [subject, ...rest] = sanitized.split(/\r?\n\r?\n|\r?\n/);
+    const args = ["commit", "-m", subject];
+    if (rest.length) {
+      const body = rest.join("\n").trim();
+      if (body) args.push("-m", body);
+    }
+    const commitResult = await runCommand("git", { cwd, args });
     
     if (commitResult.code !== 0) {
       throw new ExecutionError(
         `Failed to commit: ${commitResult.stderr || commitResult.stdout}`,
-        `git commit -m "${message}"`,
+        `git ${args.join(" ")}`,
         commitResult.code || undefined,
-        { commitMessage: message, cwd }
+        { commitMessage: sanitized, cwd }
       );
     }
     
@@ -97,7 +105,7 @@ export async function gitCommit(message: string, cwd: string = process.cwd()) {
     const forgeError = handleError(error);
     throw new ToolError("git", forgeError.message, {
       operation: "commit",
-      commitMessage: message,
+      commitMessage: (message || ""),
       cwd,
       originalError: forgeError
     });

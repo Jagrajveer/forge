@@ -1,4 +1,6 @@
 import * as readline from "node:readline";
+import chalk from "chalk";
+import figlet from "figlet";
 
 /**
  * Append-only writer for terminal output.
@@ -29,12 +31,12 @@ export function renderPlan(input: { plan?: string[]; rationale?: string }) {
   const { plan = [], rationale } = input;
   const lines: string[] = [];
   if (plan.length) {
-    lines.push("▶ Plan");
-    for (const p of plan) lines.push(`  • ${p}`);
+    lines.push(chalk.gray.bold("▶ Plan"));
+    for (const p of plan) lines.push(chalk.gray(`  • ${p}`));
   }
   if (rationale) {
-    lines.push("\n▶ Why");
-    lines.push(`  ${rationale}`);
+    lines.push(chalk.gray.bold("\n▶ Why"));
+    lines.push(chalk.gray(`  ${rationale}`));
   }
   lines.push(""); // trailing newline
   return lines.join("\n");
@@ -53,11 +55,84 @@ export function renderTokensPanel(usage: {
   const total = it + ot;
   return [
     "\n",
-    "┌─ tokens ───────────────────────────────────────┐",
-    `│ model: ${model.padEnd(38)} │`,
-    `│ input: ${String(it).padStart(7)}  output: ${String(ot).padStart(7)}  total: ${String(total).padStart(7)} │`,
-    `│ est. cost: $${cost.toFixed(6).padStart(12)}                  │`,
-    "└───────────────────────────────────────────────┘",
+    chalk.gray("┌─ tokens ───────────────────────────────────────┐"),
+    chalk.gray(`│ model: ${chalk.white(model.padEnd(38))} │`),
+    chalk.gray(`│ input: ${chalk.dim(String(it).padStart(7))}  output: ${chalk.dim(String(ot).padStart(7))}  total: ${chalk.dim(String(total).padStart(7))} │`),
+    chalk.gray(`│ est. cost: ${chalk.dim("$" + cost.toFixed(6).padStart(12))}                  │`),
+    chalk.gray("└───────────────────────────────────────────────┘"),
     "\n",
   ].join("\n");
+}
+
+export function renderWelcomeBanner() {
+  const banner = figlet.textSync("FORGE", {
+    font: "ANSI Shadow",
+    horizontalLayout: "default",
+    verticalLayout: "default",
+  });
+  const subtitle = chalk.gray("🤖 AI-Powered Engineering Copilot");
+  const version = chalk.dim("v0.1.0");
+  
+  return [
+    "\n",
+    chalk.gray(banner),
+    subtitle,
+    version,
+    "\n",
+    chalk.gray("Type your message below or '/exit' to quit"),
+    chalk.gray("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"),
+    "\n"
+  ].join("\n");
+}
+
+export function renderThinkingAnimation() {
+  return chalk.gray("💭 Thinking...");
+}
+
+export function renderProcessingAnimation() {
+  return chalk.gray("⚡ Processing...");
+}
+
+export function renderSuccessMessage(message: string) {
+  return chalk.gray(`✅ ${message}`);
+}
+
+export function renderErrorMessage(message: string) {
+  return chalk.gray(`❌ ${message}`);
+}
+
+export function renderWarningMessage(message: string) {
+  return chalk.gray(`⚠️  ${message}`);
+}
+
+export function renderInfoMessage(message: string) {
+  return chalk.gray(`ℹ️  ${message}`);
+}
+
+export function renderUserPrompt(prompt: string) {
+  return [
+    chalk.gray.bold("👤 You:"),
+    chalk.white(prompt),
+    ""
+  ].join("\n");
+}
+
+export function renderAssistantResponse(response: string) {
+  return [
+    chalk.gray.bold("🤖 Assistant:"),
+    chalk.white(response),
+    ""
+  ].join("\n");
+}
+
+export function renderToolExecution(tool: string, args: any) {
+  return [
+    chalk.gray.bold("🔧 Tool:"),
+    chalk.gray(`${tool}(${JSON.stringify(args, null, 2)})`),
+    ""
+  ].join("\n");
+}
+
+export function renderSeparator() {
+  return chalk.gray("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
 }

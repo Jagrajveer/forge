@@ -9,7 +9,8 @@ import { ensureConfigDir, loadProfile } from "./config/profile.js";
 import { Agent } from "./core/agent.js";
 import { GrokProvider } from "./providers/grok.js";
 import { summarizeChangesWithModel } from "./core/flows/summarize_changes.js";
-import { renderTokensPanel } from "./ui/render.js";
+import { renderTokensPanel, renderWelcomeBanner, renderUserPrompt, renderAssistantResponse, renderSeparator } from "./ui/render.js";
+import { startThinkingAnimation, startProcessingAnimation, stopAnimation, succeedAnimation, failAnimation } from "./ui/animations.js";
 import { registerAuthXaiCommands } from "./commands/auth-xai.js";
 import { registerPluginCommands } from "./commands/plugins.js";
 import { log, setLogLevel } from "./core/logger.js";
@@ -26,6 +27,7 @@ program
   .option("--auto", "auto-approve tool actions", false)
   .option("--safe", "require approval for writes & commands", false)
   .option("--log", "enable detailed logging", false)
+  .option("--plan", "plan first, then confirm and execute", false)
   .action(async (opts) => {
     // Set logging level based on --log flag
     if (opts.log) {
@@ -41,13 +43,23 @@ program
       approvalLevel: opts.auto ? "auto" : opts.safe ? "safe" : "balanced",
       verifyMode: opts.verify,
       execute: true, // Enable execution by default
+      planFirst: !!opts.plan,
     });
+
+    // Show welcome banner with startup animation
+    console.log(renderWelcomeBanner());
+    
+    // Add a brief startup animation
+    startProcessingAnimation();
+    await new Promise(resolve => setTimeout(resolve, 1500)); // 1.5 second delay
+    stopAnimation();
+    succeedAnimation("Ready to assist!");
 
     const onInput = async () => {
       const { msg } = await prompts({
         type: "text",
         name: "msg",
-        message: "you ...",
+        message: "💬 ",
       });
       return (msg ?? "").toString();
     };
@@ -70,6 +82,7 @@ program
   .option("--auto", "auto-approve tool actions", false)
   .option("--safe", "require approval for writes & commands", false)
   .option("--log", "enable detailed logging", false)
+  .option("--plan", "plan first, then confirm and execute", false)
   .action(async (parts, opts) => {
     // Set logging level based on --log flag
     if (opts.log) {
@@ -87,6 +100,7 @@ program
       approvalLevel: opts.auto ? "auto" : opts.safe ? "safe" : "balanced",
       verifyMode: opts.verify,
       execute: true, // Enable execution by default
+      planFirst: !!opts.plan,
     });
     
     try {
@@ -98,7 +112,7 @@ program
     }
   });
 
-/** env doctor */
+/* --------------------------- Environment diagnostics ------------------------- */
 const envCmd = program.command("env").description("environment utilities");
 envCmd
   .command("doctor")
