@@ -1,7 +1,7 @@
 import { Command } from "commander";
 import * as path from "node:path";
 import { listSessions, readSession, shortPreview } from "../state/session.js";
-import { Agent } from "../core/agent.js";
+import { startEnhancedREPL } from "../core/repl.js";
 import { summarizeSession } from "../core/flows/session_summarizer.js";
 import { GrokProvider } from "../providers/grok.js";
 
@@ -46,18 +46,12 @@ export function registerSessionCommands(program: Command) {
       } else {
         console.log(`Resuming from ${file}`);
       }
-      const agent = new Agent({ trace: opts.trace });
-      // seed by logging a synthetic system/meta turn summarizing prior history
+      // Start enhanced REPL with session context
       if (summary) {
-        // @ts-ignore internal method access
-        (agent as any).logTurn?.("system", `PRIOR SESSION SUMMARY:\n\n${summary}`);
+        console.log(`\n📝 Session Summary:\n${summary}\n`);
       }
-      await agent.chatInteractive(async () => {
-        const buf = await import("prompts");
-        const { default: prompts } = buf as any;
-        const { msg } = await prompts({ type: "text", name: "msg", message: "💬 " });
-        return (msg ?? "").toString();
-      });
+      console.log("Starting enhanced REPL with session context...");
+      await startEnhancedREPL();
     });
 }
 

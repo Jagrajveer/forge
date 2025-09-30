@@ -2,6 +2,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import * as dotenv from "dotenv";
 
+
 type Boolish = boolean | undefined;
 
 function loadEnvFiles(): string[] {

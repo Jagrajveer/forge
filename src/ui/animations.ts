@@ -1,3 +1,13 @@
+export function spinner(t: number): string {
+  const frames = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+  return frames[Math.floor(t) % frames.length];
+}
+
+export function dots(t: number): string {
+  const count = (Math.floor(t) % 3) + 1;
+  return ".".repeat(count);
+}
+
 import ora from "ora";
 import chalk from "chalk";
 import type { SpinnerName } from "cli-spinners";

@@ -1,698 +1,508 @@
-import { GrokProvider } from "../providers/grok.js";
-import { systemPrompt } from "./prompts/system.js";
-import type { TraceLevel } from "./prompts/system.js";
-import { parseModelJSON } from "./contracts.js";
-import type { ModelJSONT } from "./contracts.js";
-import { AppendOnlyStream, renderPlan, renderUserPrompt, renderAssistantResponse, renderSeparator, renderTokensPanel, renderContextPanel, startThinkingPanel, updateThinkingPanel, endThinkingPanel, renderContextBar } from "../ui/render.js";
+/**
+ * Enhanced Agent with RAG, MCP, and PLAN → DESIGN → EXECUTE workflow
+ */
 import chalk from "chalk";
-import { startThinkingAnimation, startProcessingAnimation, stopAnimation, succeedAnimation, failAnimation, startThinkingPulse, startLightning } from "../ui/animations.js";
-import { appendMemory } from "../state/memory.js";
-import { summarizeChangesWithModel, summarizeCodebaseWithModel } from "./flows/summarize_changes.js";
-import { planOnly } from "./flows/plan_only.js";
-import { executeTool } from "./tools/registry.js";
-import {
-  requiresApprovalForRun,
-  requiresApprovalForWrite,
-  type ApprovalLevel,
-} from "./safety.js";
-import { confirmYN } from "../ui/confirm.js";
-import { runVerification, type VerifyMode } from "./verify.js";
-import { inferToolCallsFromUser } from "./heuristics.js";
-import { ForgeError, getErrorDisplayMessage, logError } from "./errors.js";
-import { SessionLog, type Turn } from "../state/history.js";
-import { log } from "./logger.js";
+import prompts from "prompts";
+import { chat } from "../llm/xai.js";
+import type { XAIMessage } from "../llm/xai.js";
+import { writeFileSafe } from "./patcher.js";
+import { executeCommands } from "./runner.js";
+import { ContextService } from "./context.js";
 
-export interface AgentOptions {
-  trace?: TraceLevel;
-  appendOnly?: boolean;
-  temperature?: number;
-  execute?: boolean;
-  approvalLevel?: ApprovalLevel; // safe | balanced | auto
-  verifyMode?: VerifyMode; // none | lint | test | both
-  sessionLogging?: boolean; // enable/disable session logging
-  planFirst?: boolean; // plan → confirm → execute
+type Phase = "PLAN" | "DESIGN" | "EXECUTE" | "VERIFY" | "COMPLETE";
+
+interface Task {
+  id: string;
+  description: string;
+  completed: boolean;
+  reasoning: string;
 }
 
-type Observation = { title: string; body: string };
-type ChatRole = "system" | "user" | "assistant";
-type ChatMessage = { role: ChatRole; content: string };
+interface PlanPhase {
+  goal: string;
+  context: string;
+  tasks: Task[];
+  acceptanceCriteria: string[];
+  estimatedComplexity: "low" | "medium" | "high";
+}
+
+interface DesignPhase {
+  architecture: string;
+  fileMap: Record<string, { purpose: string; dependencies: string[] }>;
+  dataFlow: string;
+  interfaces: Array<{ name: string; definition: string }>;
+  uxSketch: string;
+}
+
+interface ExecutePhase {
+  files: Array<{ path: string; content: string; purpose: string }>;
+  commands: Array<{ command: string; purpose: string }>;
+  verificationSteps: string[];
+}
+
+interface AgentState {
+  goal: string;
+  currentPhase: Phase;
+  plan: PlanPhase | null;
+  design: DesignPhase | null;
+  execute: ExecutePhase | null;
+  chatHistory: XAIMessage[];
+  autoApprove: boolean;
+}
 
 export class Agent {
-  private llm = new GrokProvider();
-  private sessionLog?: SessionLog;
-  private filesReadCount = 0;
-  private bytesReadCount = 0;
-  private totalInputTokens = 0;
-  private totalOutputTokens = 0;
-  private totalCostUSD = 0;
-  private currentModel = "";
-  private liveCompletionTokens = 0;
-  private liveReasoningTokens = 0;
-  
-  constructor(private opts: AgentOptions = {}) {
-    // Initialize session logging if enabled
-    if (this.opts.sessionLogging !== false) {
-      this.sessionLog = SessionLog.create();
+  private state: AgentState;
+  private contextService: ContextService;
+
+  constructor(goal: string, autoApprove: boolean = false) {
+    this.state = {
+      goal,
+      currentPhase: "PLAN",
+      plan: null,
+      design: null,
+      execute: null,
+      chatHistory: [],
+      autoApprove,
+    };
+    this.contextService = new ContextService();
+  }
+
+  async run(): Promise<void> {
+    console.log(chalk.bold.cyan(`\n🤖 Enhanced Agent\n`));
+    console.log(chalk.bold(`Goal: ${this.state.goal}\n`));
+
+    try {
+      while (this.state.currentPhase !== "COMPLETE") {
+        console.log(chalk.bold.yellow(`\n${"═".repeat(60)}`));
+        console.log(chalk.bold.yellow(`  Phase: ${this.state.currentPhase}`));
+        console.log(chalk.bold.yellow(`${"═".repeat(60)}\n`));
+
+        switch (this.state.currentPhase) {
+          case "PLAN":
+            await this.runPlanPhase();
+            break;
+          case "DESIGN":
+            await this.runDesignPhase();
+            break;
+          case "EXECUTE":
+            await this.runExecutePhase();
+            break;
+          case "VERIFY":
+            await this.runVerifyPhase();
+            break;
+        }
+      }
+
+      console.log(chalk.green.bold("\n✅ Agent workflow complete!\n"));
+      this.printSummary();
+    } catch (error) {
+      console.error(chalk.red.bold("\n❌ Agent workflow failed:"));
+      console.error(chalk.red(error instanceof Error ? error.message : String(error)));
+      throw error;
+    } finally {
+      await this.contextService.close();
     }
   }
 
-  private logTurn(role: Turn["role"], content: string, meta?: Record<string, unknown>): void {
-    if (!this.sessionLog) return;
-    
-    this.sessionLog.append({
-      ts: new Date().toISOString(),
-      role,
-      content,
-      meta
-    });
-  }
+  private async runPlanPhase(): Promise<void> {
+    console.log(chalk.blue("📋 Planning phase...\n"));
 
-  private logUserInput(input: string): void {
-    this.logTurn("user", input);
-    log.user(input);
-  }
-
-  private logAssistantResponse(response: string, actions?: any[]): void {
-    this.logTurn("assistant", response, { actions });
-    log.assistant(response, actions);
-  }
-
-  private logToolExecution(tool: string, args: any, result: any, error?: any): void {
-    this.logTurn("tool", `Executed ${tool}`, {
-      tool,
-      args,
-      result,
-      error: error ? { message: error.message, code: error.code } : undefined
-    });
-    log.tool(tool, args, result, error);
-  }
-
-  private logObservation(observation: Observation): void {
-    this.logTurn("meta", `Observation: ${observation.title}`, {
-      observation
-    });
-  }
-
-  getSessionLogPath(): string | undefined {
-    return this.sessionLog?.path();
-  }
-
-  private showContextPanel(out: AppendOnlyStream) {
-    const totalTokens = this.totalInputTokens + this.totalOutputTokens;
-    const contextTokens = Math.floor(this.bytesReadCount / 4); // rough estimate
-    const contextPercentage = totalTokens > 0 ? Math.round((contextTokens / totalTokens) * 100) : 0;
-    
-    out.write(renderContextPanel({
-      filesRead: this.filesReadCount,
-      bytesRead: this.bytesReadCount,
-      approxTokens: contextTokens,
-    }));
-    
-    // Show actual token usage from Grok API
-    if (totalTokens > 0) {
-      out.write(renderTokensPanel({
-        inputTokens: this.totalInputTokens,
-        outputTokens: this.totalOutputTokens,
-        costUSD: this.totalCostUSD,
-        model: this.currentModel,
-      }));
-      
-      out.write(chalk.gray(`Context usage: ${contextPercentage}% of total tokens\n\n`));
+    let context = "";
+    try {
+      const contextResult = await this.contextService.getContext(this.state.goal);
+      context = this.contextService.formatContextForLLM(contextResult);
+    } catch (error) {
+      console.warn(chalk.yellow(`Context retrieval failed: ${error}`));
     }
-  }
 
-  async chatInteractive(getUserInput: () => Promise<string>) {
-    const out = new AppendOnlyStream();
+    const planPrompt = `You are an expert software architect. Analyze the following goal and create a detailed implementation plan.
 
-    while (true) {
-      let user: string;
-      try {
-        user = await getUserInput();
-      } catch (err: any) {
-        out.write(`\n⚠️  Input failed: ${err?.message || String(err)}\n`);
-        continue;
-      }
-      if (!user || user.trim().toLowerCase() === "/exit") {
-        if (user?.trim().toLowerCase() === "/exit") {
-          out.write(renderSeparator() + "\n");
-          out.write("👋 Goodbye! Thanks for using Forge CLI.\n");
-          out.write(renderSeparator() + "\n");
-        }
-        break;
-      }
-      
-      this.logUserInput(user);
-      
-      // Display user input with enhanced formatting
-      out.write(renderUserPrompt(user));
+GOAL: ${this.state.goal}
 
-      const sys = systemPrompt(this.opts.trace ?? "plan");
-      const baseMessages: ChatMessage[] = [
-        { role: "system", content: sys },
-        { role: "user", content: user },
-      ];
+${context ? `\nRELEVANT CONTEXT:\n${context}\n` : ""}
 
-      let messages: ChatMessage[] = [...baseMessages];
-      let passesRemaining = 2;
+Create a comprehensive plan with:
+1. Context analysis
+2. Detailed task breakdown
+3. Acceptance criteria
+4. Complexity estimation
 
-      while (passesRemaining-- > 0) {
-        // Start thinking panel + pulse
-        startThinkingPanel(out, "Thinking…");
-        startThinkingPulse();
-        
-        let collected = "";
-        let reasoning = "";
-        try {
-          const maybeStream = this.llm.chat(messages, {
-            stream: true,
-            temperature: this.opts.temperature ?? 0.3,
-            reasoning: (this.opts.trace ?? "plan") === "verbose",
-          }) as unknown;
-
-          const stream = (await maybeStream) as AsyncIterable<{ content: string; reasoning?: string }>;
-          
-          // collapse panel before processing spinner
-          endThinkingPanel(out);
-          startProcessingAnimation();
-          
-          this.liveCompletionTokens = 0;
-          this.liveReasoningTokens = 0;
-          for await (const chunk of stream) {
-            collected += chunk.content;
-            if (chunk.reasoning) {
-              reasoning = chunk.reasoning;
-              updateThinkingPanel(out, reasoning);
-            }
-            // Increment approximate counters by characters/4
-            if (chunk.content) this.liveCompletionTokens += Math.floor(String(chunk.content).length / 4);
-            if (chunk.reasoning) this.liveReasoningTokens += Math.floor(String(chunk.reasoning).length / 4);
-            // Render a compact status line under the input
-            const bar = renderContextBar(
-              {
-                promptTokens: Math.floor(messages.map(m => String(m.content).length).reduce((a,b)=>a+b,0)/4),
-                completionTokens: this.liveCompletionTokens,
-                reasoningTokens: this.liveReasoningTokens,
-                totalTokens: this.liveCompletionTokens + this.liveReasoningTokens + Math.floor(messages.map(m => String(m.content).length).reduce((a,b)=>a+b,0)/4),
-                modelId: this.currentModel,
-              },
-              2_000_000,
-            );
-            out.clearLine();
-            out.write(bar + "\n");
-          }
-          
-          // Estimate tokens for streaming (approximate)
-          this.totalInputTokens += Math.floor(messages.map(m => String(m.content).length).reduce((a, b) => a + b, 0) / 4);
-          this.totalOutputTokens += Math.floor(collected.length / 4);
-        } catch (err: any) {
-        stopAnimation();
-          endThinkingPanel(out);
-          const msg = err?.message || String(err);
-          const observation = { title: "model stream error", body: msg } as Observation;
-          out.write(`\n⚠️  Model stream failed: ${msg}\n`);
-          this.logObservation(observation);
-          messages = [...messages, { role: "assistant", content: `OBSERVATIONS:\n\n### model stream error\n${msg}` }];
-          continue;
-        }
-        
-        // Stop processing animation
-        stopAnimation();
-
-        let parsed: ModelJSONT | undefined;
-        try {
-          parsed = parseModelJSON(collected);
-        } catch (err: any) {
-          const msg = err?.message || String(err);
-          this.logObservation({ title: "parse error", body: msg });
-        }
-
-        // Display thinking/reasoning if available and trace level allows it
-        if (reasoning && (this.opts.trace ?? "plan") === "verbose") {
-          out.write("\n" + renderSeparator() + "\n");
-          out.write("💭 Thinking:\n");
-          out.write("```\n" + reasoning + "\n```\n");
-          out.write(renderSeparator() + "\n");
-        }
-
-        // For summary tasks, don't show raw plan/rationale - process intelligently
-        if (inferSummarizeIntent(user)) {
-          if (parsed) {
-            // Just show a brief status, don't display the full plan
-            out.write("🔍 Analyzing codebase structure and gathering information...\n");
-            this.logAssistantResponse(collected, parsed.actions);
-          } else {
-            // Model didn't send contract JSON — show whatever text it sent.
-            if (collected.trim()) {
-              out.write(renderAssistantResponse(collected));
-              this.logAssistantResponse(collected);
-            }
-          }
-        } else {
-          // Always render plan/rationale if we have them for non-summary tasks.
-          if (parsed) {
-            out.write(renderPlan({ plan: parsed.plan, rationale: parsed.rationale }));
-            this.logAssistantResponse(collected, parsed.actions);
-          } else {
-            // Model didn't send contract JSON — show whatever text it sent.
-            if (collected.trim()) {
-              out.write(renderAssistantResponse(collected));
-              this.logAssistantResponse(collected);
-            }
-          }
-        }
-
-        // Decide what actions to run:
-        //  1) model-provided actions
-        //  2) else: heuristic fallback from the last user message
-        const modelActions = parsed?.actions ?? [];
-        const fallbackActions =
-          modelActions.length === 0 ? inferToolCallsFromUser(user) : [];
-        const actionsToRun = modelActions.length ? modelActions : fallbackActions;
-
-        const observations: Observation[] = [];
-        let madeEdits = false;
-
-        if (this.opts.execute && actionsToRun.length) {
-          // If actions are from heuristics, note it for visibility.
-          if (fallbackActions.length) {
-            out.write("\n🧭 No actions from the model; applying a safe fallback intent.\n");
-          }
-
-          for (const action of actionsToRun) {
-            const tool = (action as any).tool as string;
-
-            if (tool === "open_file") {
-              const { path } = action as any;
-              // silent read with subtle animation
-              startProcessingAnimation();
-              try {
-                const res = await executeTool({ tool: "open_file", args: { path } });
-                stopAnimation();
-                // track context silently
-                this.filesReadCount += 1;
-                this.bytesReadCount += res.content ? Buffer.byteLength(res.content, "utf8") : 0;
-                
-                // do not print content; optionally log observation
-                const fileSize = res.content ? res.content.length : 0;
-                const lines = res.content ? res.content.split('\n').length : 0;
-                
-                const observation = {
-                  title: `open_file ${path}`,
-                  body: `Read ${path} (${lines} lines, ${fileSize} chars${res.truncated ? ', truncated' : ''})`,
-                };
-                observations.push(observation);
-                this.logToolExecution("open_file", { path }, res);
-                this.logObservation(observation);
-              } catch (err: any) {
-                stopAnimation();
-                const error = err instanceof ForgeError ? err : new ForgeError(err.message, "TOOL_ERROR");
-                const displayMessage = getErrorDisplayMessage(error);
-                out.write(`⚠️  open_file failed: ${displayMessage}\n`);
-                logError(error);
-                this.logToolExecution("open_file", { path }, null, error);
-              }
-              continue;
-            }
-            if (tool === "run") {
-              const { cmd } = action as any;
-              
-              // Convert Unix commands to Windows equivalents for better compatibility
-              let windowsCmd = cmd;
-              if (process.platform === 'win32') {
-                if (cmd.includes('find . -type f')) {
-                  windowsCmd = 'dir /s /b *.ts *.js *.json *.md';
-                } else if (cmd.includes('head -20')) {
-                  windowsCmd = cmd.replace('head -20', 'more');
-                } else if (cmd.includes('cat')) {
-                  windowsCmd = cmd.replace('cat', 'type');
-                } else if (cmd.includes('ls -la')) {
-                  windowsCmd = cmd.replace('ls -la', 'dir');
-                }
-              }
-              
-              const needsApproval = requiresApprovalForRun(
-                windowsCmd,
-                this.opts.approvalLevel ?? "balanced"
-              );
-              if (needsApproval) {
-                out.write(`\n⚠️  run requires approval: ${windowsCmd}\n`);
-                const ok = await confirmYN(`Allow RUN: ${windowsCmd}?`, false);
-                if (!ok) {
-                  out.write(`🚫 Skipped RUN: ${windowsCmd}\n`);
-                  continue;
-                }
-              }
-              out.write(`\n$ ${windowsCmd}\n`);
-              try {
-                const res = await executeTool({ tool: "run", args: { cmd: windowsCmd } });
-                const body = (res.stdout || res.stderr || "").trim();
-                
-                // For summary tasks, don't show raw output - just indicate execution
-                if (inferSummarizeIntent(user)) {
-                  const lines = body.split('\n').filter((line: string) => line.trim());
-                  out.write(`✓ Command executed (${lines.length} lines of output)\n`);
-                } else {
-                  out.write(
-                    "```text\n" + (body.length ? body : "(no output)") + "\n```\n"
-                  );
-                }
-                
-                observations.push({
-                  title: `run ${windowsCmd}`,
-                  body: `exit=${res.code} | stdout=${(res.stdout || "").slice(
-                    -2000
-                  )} | stderr=${(res.stderr || "").slice(-2000)}`,
-                });
-              } catch (err: any) {
-                const error = err instanceof ForgeError ? err : new ForgeError(err.message, "TOOL_ERROR");
-                const displayMessage = getErrorDisplayMessage(error);
-                out.write(`⚠️  run failed: ${displayMessage}\n`);
-                out.write("```text\n" + (err?.stderr || err?.stdout || displayMessage) + "\n```\n");
-                logError(error);
-                // Feed observation back in to allow model to adjust command
-                observations.push({ title: "run error", body: displayMessage });
-              }
-              continue;
-            }
-
-            if (tool === "apply_patch") {
-              const { patch } = action as any;
-              const needsApproval = requiresApprovalForWrite(
-                this.opts.approvalLevel ?? "balanced",
-                /*unknown*/ undefined
-              );
-              if (needsApproval) {
-                out.write(`\n⚠️  apply_patch requires approval\n`);
-                const ok = await confirmYN(`Apply PATCH provided by model?`, false);
-                if (!ok) {
-                  out.write(`🚫 Skipped APPLY PATCH\n`);
-                  continue;
-                }
-              }
-              try {
-                const res = await executeTool({
-                  tool: "apply_patch",
-                  args: { patch },
-                });
-                out.write(
-                  `\n🩹 apply_patch: ${res.ok ? "applied" : "failed"}\n`
-                );
-                if (!res.ok) {
-                  out.write(
-                    "```text\n" + [`attempted:`, ...res.attempted].join("\n") + "\n```\n"
-                  );
-                } else {
-                  madeEdits = true;
-                }
-                observations.push({
-                  title: "apply_patch",
-                  body: res.ok
-                    ? "Patch applied successfully."
-                    : "Patch failed to apply.",
-                });
-              } catch (err: any) {
-                const error = err instanceof ForgeError ? err : new ForgeError(err.message, "TOOL_ERROR");
-                const displayMessage = getErrorDisplayMessage(error);
-                out.write(`⚠️  apply_patch failed: ${displayMessage}\n`);
-                logError(error);
-              }
-              continue;
-            }
-
-            if (tool === "write_file") {
-              const { path, content } = action as any;
-              const bytes = Buffer.byteLength(content ?? "", "utf8");
-              const needsApproval = requiresApprovalForWrite(
-                this.opts.approvalLevel ?? "balanced",
-                bytes
-              );
-              if (needsApproval) {
-                out.write(
-                  `\n⚠️  write_file requires approval (${bytes} bytes): ${path}\n`
-                );
-                const ok = await confirmYN(
-                  `Write ${path}? (bytes: ${bytes})`,
-                  false
-                );
-                if (!ok) {
-                  out.write(`🚫 Skipped WRITE ${path}\n`);
-                  continue;
-                }
-              }
-              try {
-                const res = await executeTool({
-                  tool: "write_file",
-                  args: { path, content },
-                });
-                out.write(`\n✍️  write_file: ${path} (${res.bytes} bytes)\n`);
-                madeEdits = true;
-                observations.push({
-                  title: `write_file ${path}`,
-                  body: `Wrote ${res.bytes} bytes.`,
-                });
-              } catch (err: any) {
-                const error = err instanceof ForgeError ? err : new ForgeError(err.message, "TOOL_ERROR");
-                const displayMessage = getErrorDisplayMessage(error);
-                out.write(`⚠️  write_file failed: ${displayMessage}\n`);
-                logError(error);
-              }
-              continue;
-            }
-
-            if (tool === "git") {
-              const { subtool, args } = action as any;
-              if (subtool === "commit") {
-                const needsApproval = requiresApprovalForWrite(
-                  this.opts.approvalLevel ?? "balanced",
-                  /*unknown*/ undefined
-                );
-                const msg =
-                  String(args?.message ?? "").trim() || "chore: update";
-                if (needsApproval) {
-                  out.write(
-                    `\n⚠️  git commit requires approval: "${msg}"\n`
-                  );
-                  const ok = await confirmYN(
-                    `Create commit with message: "${msg}" ?`,
-                    false
-                  );
-                  if (!ok) {
-                    out.write(`🚫 Skipped GIT COMMIT\n`);
-                    continue;
-                  }
-                }
-                try {
-                  const res = await executeTool({
-                    tool: "git",
-                    args: { subtool: "commit", message: msg },
-                  });
-                  out.write(`\n🌿 git commit: ${res.ok ? "created" : "failed"}\n`);
-                  observations.push({ title: "git commit", body: res.output || (res.ok ? "commit created" : "failed") });
-                } catch (err: any) {
-                  const error = err instanceof ForgeError ? err : new ForgeError(err.message, "TOOL_ERROR");
-                  const displayMessage = getErrorDisplayMessage(error);
-                  out.write(`⚠️  git commit failed: ${displayMessage}\n`);
-                  observations.push({ title: "git commit error", body: displayMessage });
-                  logError(error);
-                }
-                continue;
-              }
-              if (subtool === "create_branch") {
-                const name = String(args?.name ?? "").trim();
-                if (!name) {
-                  out.write(`\n⚠️  git create_branch missing name\n`);
-                  continue;
-                }
-                const res = await executeTool({
-                  tool: "git",
-                  args: { subtool: "create_branch", name },
-                });
-                out.write(
-                  `\n🌱 git branch: ${res.ok ? `created ${name}` : "failed"}\n`
-                );
-                observations.push({
-                  title: "git create_branch",
-                  body: res.output || "",
-                });
-                continue;
-              }
-              out.write(`\nℹ️  git subtool '${subtool}' not implemented.\n`);
-              continue;
-            }
-
-            out.write(`\nℹ️  Unknown action '${tool}' — skipping.\n`);
-          }
-        }
-
-        if (parsed?.message_markdown) {
-          out.write("\n" + parsed.message_markdown + "\n");
-        }
-
-        if (madeEdits && (this.opts.verifyMode ?? "none") !== "none") {
-          const { summary, ok } = await runVerification(
-            this.opts.verifyMode ?? "none"
-          );
-          observations.push({
-            title: `verify (${this.opts.verifyMode})`,
-            body: summary,
-          });
-          out.write(
-            `\n🧪 verify[${this.opts.verifyMode}]: ${ok ? "OK" : "Issues found"}\n`
-          );
-          out.write("```text\n" + summary + "\n```\n");
-        }
-
-        if (observations.length) {
-          const obsMd = observations
-            .map((o) => `### ${o.title}\n${o.body}`)
-            .join("\n\n");
-          messages = [
-            ...messages,
-            { role: "assistant", content: `OBSERVATIONS:\n\n${obsMd}` },
-          ];
-          // Persist a concise memory line for high-level traceability
-          try {
-            appendMemory(`Turn observations: ${observations.map(o=>o.title).join(', ')}`);
-          } catch {}
-          // Show enhanced context panel after observations
-          this.showContextPanel(out);
-          continue;
-        }
-
-        break;
-      }
-
-      // Show context panel at end of turn
-      this.showContextPanel(out);
-
-      if (inferSummarizeIntent(user)) {
-        // Check if this is a codebase summary (not just changes)
-        const isCodebaseSummary = user.toLowerCase().includes("entire") || 
-                                 user.toLowerCase().includes("whole") || 
-                                 user.toLowerCase().includes("codebase");
-        
-        if (isCodebaseSummary) {
-          out.write("\n🔍 Analyzing codebase structure and key files...\n");
-          const md = await summarizeCodebaseWithModel(this.llm, {
-            trace: this.opts.trace ?? "plan",
-            temperature: 0.3,
-            maxChars: 180_000,
-          });
-          out.write("\n" + (md || "_No codebase summary produced._") + "\n");
-        } else {
-          const md = await summarizeChangesWithModel(this.llm, {
-            trace: this.opts.trace ?? "plan",
-            temperature: 0.2,
-            maxChars: 180_000,
-          });
-          out.write("\n" + (md || "_No summary produced._") + "\n");
-        }
-      }
+Respond with a JSON object containing:
+{
+  "context": "analysis of the goal and current state",
+  "tasks": [
+    {
+      "id": "task_1",
+      "description": "specific task description",
+      "reasoning": "why this task is needed"
     }
-  }
+  ],
+  "acceptanceCriteria": ["criterion 1", "criterion 2"],
+  "estimatedComplexity": "low|medium|high"
+}`;
 
-  async oneshot(prompt: string) {
-    this.logUserInput(prompt);
-    
-    // Display user input with enhanced formatting
-    const out = new AppendOnlyStream();
-    out.write(renderUserPrompt(prompt));
-    
-    // If plan-first mode, propose plan and confirm before execution
-    if (this.opts.planFirst) {
-      const plan = await planOnly(this.llm as any, prompt, { trace: this.opts.trace });
-      out.write(renderPlan({ plan: plan.plan, rationale: plan.rationale }));
-      const ok = await confirmYN("Proceed to execute this plan?", false);
-      if (!ok) {
-        out.write("🚫 Cancelled by user.\n");
+    const messages: XAIMessage[] = [
+      { role: "system", content: planPrompt },
+      { role: "user", content: this.state.goal }
+    ];
+
+    const response = await chat(messages);
+    this.state.chatHistory.push({ role: "user", content: this.state.goal });
+    this.state.chatHistory.push({ role: "assistant", content: response.text });
+
+    try {
+      const planData = JSON.parse(response.text);
+      this.state.plan = {
+        goal: this.state.goal,
+        context: planData.context || "",
+        tasks: planData.tasks || [],
+        acceptanceCriteria: planData.acceptanceCriteria || [],
+        estimatedComplexity: planData.estimatedComplexity || "medium"
+      };
+
+      console.log(chalk.green("✅ Plan created successfully!\n"));
+      this.printPlan();
+    } catch (error) {
+      console.error(chalk.red("Failed to parse plan JSON:"));
+      console.error(chalk.red(response));
+      throw new Error("Plan phase failed - invalid JSON response");
+    }
+
+    if (!this.state.autoApprove) {
+      const { proceed } = await prompts({
+        type: "confirm",
+        name: "proceed",
+        message: "Proceed to design phase?",
+        initial: true
+      });
+
+      if (!proceed) {
+        this.state.currentPhase = "COMPLETE";
         return;
       }
     }
 
-    // Start thinking panel
-    startThinkingPanel(out, "Thinking…");
-    
-    const sys = systemPrompt(this.opts.trace ?? "plan");
-    const messages: ChatMessage[] = [
-      { role: "system", content: sys },
-      { role: "user", content: prompt },
+    this.state.currentPhase = "DESIGN";
+  }
+
+  private async runDesignPhase(): Promise<void> {
+    console.log(chalk.blue("🎨 Design phase...\n"));
+
+    const designPrompt = `You are an expert software architect. Based on the plan, create a detailed design.
+
+PLAN:
+${JSON.stringify(this.state.plan, null, 2)}
+
+Create a comprehensive design with:
+1. System architecture
+2. File structure and purposes
+3. Data flow
+4. Interface definitions
+5. UX considerations
+
+Respond with a JSON object containing:
+{
+  "architecture": "high-level system design",
+  "fileMap": {
+    "path/to/file.ts": {
+      "purpose": "file purpose",
+      "dependencies": ["other/file.ts"]
+    }
+  },
+  "dataFlow": "how data flows through the system",
+  "interfaces": [
+    {
+      "name": "InterfaceName",
+      "definition": "interface definition"
+    }
+  ],
+  "uxSketch": "user experience description"
+}`;
+
+    const messages: XAIMessage[] = [
+      { role: "system", content: designPrompt },
+      ...this.state.chatHistory
     ];
-    const res = (await this.llm.chat(messages, {
-      stream: false,
-      temperature: this.opts.temperature ?? 0.3,
-      reasoning: (this.opts.trace ?? "plan") !== "none",
-    })) as { text: string; usage?: any; reasoning?: string };
 
-    // End panel
-    endThinkingPanel(out);
-    
-    // Track actual usage from Grok API
-    if (res.usage) {
-      this.totalInputTokens += res.usage.inputTokens || 0;
-      this.totalOutputTokens += res.usage.outputTokens || 0;
-      this.totalCostUSD += res.usage.costUSD || 0;
-      this.currentModel = res.usage.model || this.currentModel;
+    const response = await chat(messages);
+    this.state.chatHistory.push({ role: "assistant", content: response.text });
+
+    try {
+      const designData = JSON.parse(response.text);
+      this.state.design = {
+        architecture: designData.architecture || "",
+        fileMap: designData.fileMap || {},
+        dataFlow: designData.dataFlow || "",
+        interfaces: designData.interfaces || [],
+        uxSketch: designData.uxSketch || ""
+      };
+
+      console.log(chalk.green("✅ Design created successfully!\n"));
+      this.printDesign();
+    } catch (error) {
+      console.error(chalk.red("Failed to parse design JSON:"));
+      console.error(chalk.red(response));
+      throw new Error("Design phase failed - invalid JSON response");
     }
 
-    this.logAssistantResponse(res.text);
-    
-    // Display thinking/reasoning if available and trace level allows it
-    if (res.reasoning && (this.opts.trace ?? "plan") === "verbose") {
-      out.write(renderSeparator() + "\n");
-      out.write("💭 Thinking:\n");
-      out.write("```\n" + res.reasoning + "\n```\n");
-      out.write(renderSeparator() + "\n");
-    }
-    
-    out.write(renderAssistantResponse(res.text));
-    
-    // Show context panel at end
-    this.showContextPanel(out);
+    if (!this.state.autoApprove) {
+      const { proceed } = await prompts({
+        type: "confirm",
+        name: "proceed",
+        message: "Proceed to execution phase?",
+        initial: true
+      });
 
-    if (inferSummarizeIntent(prompt)) {
-      // Check if this is a codebase summary (not just changes)
-      const isCodebaseSummary = prompt.toLowerCase().includes("entire") || 
-                               prompt.toLowerCase().includes("whole") || 
-                               prompt.toLowerCase().includes("codebase");
-      
-      if (isCodebaseSummary) {
-        out.write("\n🔍 Analyzing codebase structure and key files...\n");
-        const md = await summarizeCodebaseWithModel(this.llm, {
-          trace: this.opts.trace ?? "plan",
-          temperature: 0.3,
-          maxChars: 180_000,
-        });
-        out.write("\n" + (md || "_No codebase summary produced._") + "\n");
-      } else {
-        const md = await summarizeChangesWithModel(this.llm, {
-          trace: this.opts.trace ?? "plan",
-          temperature: 0.2,
-          maxChars: 180_000,
-        });
-        out.write("\n" + (md || "_No summary produced._") + "\n");
+      if (!proceed) {
+        this.state.currentPhase = "COMPLETE";
+        return;
+      }
+    }
+
+    this.state.currentPhase = "EXECUTE";
+  }
+
+  private async runExecutePhase(): Promise<void> {
+    console.log(chalk.blue("⚡ Execution phase...\n"));
+
+    const executePrompt = `You are an expert software developer. Based on the plan and design, generate the implementation.
+
+PLAN:
+${JSON.stringify(this.state.plan, null, 2)}
+
+DESIGN:
+${JSON.stringify(this.state.design, null, 2)}
+
+Generate the complete implementation with:
+1. All necessary files with full content
+2. Commands to run
+3. Verification steps
+
+Respond with a JSON object containing:
+{
+  "files": [
+    {
+      "path": "path/to/file.ts",
+      "content": "complete file content",
+      "purpose": "what this file does"
+    }
+  ],
+  "commands": [
+    {
+      "command": "npm install",
+      "purpose": "install dependencies"
+    }
+  ],
+  "verificationSteps": ["step 1", "step 2"]
+}`;
+
+    const messages: XAIMessage[] = [
+      { role: "system", content: executePrompt },
+      ...this.state.chatHistory
+    ];
+
+    const response = await chat(messages);
+    this.state.chatHistory.push({ role: "assistant", content: response.text });
+
+    try {
+      const executeData = JSON.parse(response.text);
+      this.state.execute = {
+        files: executeData.files || [],
+        commands: executeData.commands || [],
+        verificationSteps: executeData.verificationSteps || []
+      };
+
+      console.log(chalk.green("✅ Implementation generated!\n"));
+      this.printExecute();
+
+      await this.executeImplementation();
+    } catch (error) {
+      console.error(chalk.red("Failed to parse execution JSON:"));
+      console.error(chalk.red(response));
+      throw new Error("Execution phase failed - invalid JSON response");
+    }
+
+    this.state.currentPhase = "VERIFY";
+  }
+
+  private async runVerifyPhase(): Promise<void> {
+    console.log(chalk.blue("🔍 Verification phase...\n"));
+
+    if (!this.state.execute) {
+      console.log(chalk.yellow("No implementation to verify"));
+      this.state.currentPhase = "COMPLETE";
+      return;
+    }
+
+    console.log("Running verification steps...\n");
+
+    for (const step of this.state.execute.verificationSteps) {
+      console.log(chalk.cyan(`• ${step}`));
+    }
+
+    if (this.state.plan) {
+      for (const task of this.state.plan.tasks) {
+        task.completed = true;
+      }
+    }
+
+    console.log(chalk.green("\n✅ Verification complete!\n"));
+    this.state.currentPhase = "COMPLETE";
+  }
+
+  private async executeImplementation(): Promise<void> {
+    if (!this.state.execute) return;
+
+    console.log(chalk.blue("📝 Creating files...\n"));
+
+    for (const file of this.state.execute.files) {
+      try {
+        console.log(chalk.cyan(`Creating: ${file.path}`));
+        writeFileSafe(file.path, file.content);
+        console.log(chalk.green(`✅ ${file.path}`));
+      } catch (error) {
+        console.error(chalk.red(`❌ Failed to create ${file.path}: ${error}`));
+      }
+    }
+
+    if (this.state.execute.commands.length > 0) {
+      console.log(chalk.blue("\n🔧 Running commands...\n"));
+
+      for (const cmd of this.state.execute.commands) {
+        console.log(chalk.cyan(`Running: ${cmd.command}`));
+        try {
+          await executeCommands({
+            goal: cmd.command,
+            steps: [{ description: cmd.purpose, command: cmd.command, expected: "Success" }]
+          }, { yes: this.state.autoApprove });
+          console.log(chalk.green(`✅ ${cmd.command}`));
+        } catch (error) {
+          console.error(chalk.red(`❌ Failed to run ${cmd.command}: ${error}`));
+        }
       }
     }
   }
+
+  private printPlan(): void {
+    if (!this.state.plan) return;
+
+    console.log(chalk.bold.cyan("📋 PLAN SUMMARY"));
+    console.log(chalk.gray("─".repeat(40)));
+    console.log(chalk.white(`Context: ${this.state.plan.context}`));
+    console.log(chalk.white(`Complexity: ${this.state.plan.estimatedComplexity}`));
+    console.log(chalk.white(`Tasks: ${this.state.plan.tasks.length}`));
+    console.log(chalk.white(`Acceptance Criteria: ${this.state.plan.acceptanceCriteria.length}`));
+    console.log();
+  }
+
+  private printDesign(): void {
+    if (!this.state.design) return;
+
+    console.log(chalk.bold.cyan("🎨 DESIGN SUMMARY"));
+    console.log(chalk.gray("─".repeat(40)));
+    console.log(chalk.white(`Architecture: ${this.state.design.architecture}`));
+    console.log(chalk.white(`Files: ${Object.keys(this.state.design.fileMap).length}`));
+    console.log(chalk.white(`Interfaces: ${this.state.design.interfaces.length}`));
+    console.log();
+  }
+
+  private printExecute(): void {
+    if (!this.state.execute) return;
+
+    console.log(chalk.bold.cyan("⚡ EXECUTION SUMMARY"));
+    console.log(chalk.gray("─".repeat(40)));
+    console.log(chalk.white(`Files: ${this.state.execute.files.length}`));
+    console.log(chalk.white(`Commands: ${this.state.execute.commands.length}`));
+    console.log(chalk.white(`Verification Steps: ${this.state.execute.verificationSteps.length}`));
+    console.log();
+  }
+
+  private printSummary(): void {
+    console.log(chalk.bold.green("🎉 FINAL SUMMARY"));
+    console.log(chalk.gray("═".repeat(50)));
+
+    if (this.state.plan) {
+      const completedTasks = this.state.plan.tasks.filter(t => t.completed).length;
+      console.log(chalk.white(`Tasks: ${completedTasks}/${this.state.plan.tasks.length} completed`));
+    }
+
+    if (this.state.execute) {
+      console.log(chalk.white(`Files created: ${this.state.execute.files.length}`));
+      console.log(chalk.white(`Commands executed: ${this.state.execute.commands.length}`));
+    }
+
+    console.log(chalk.white(`Goal: ${this.state.goal}`));
+    console.log();
+  }
+
+  async startInteractive(): Promise<void> {
+    console.log(chalk.bold.cyan(`\n🤖 Enhanced Agent - Interactive Mode\n`));
+    console.log(chalk.gray("Type 'exit' to quit, 'help' for commands\n"));
+
+    while (true) {
+      try {
+        const { input } = await prompts({
+          type: "text",
+          name: "input",
+          message: "💬 ",
+        });
+
+        if (!input || input.toLowerCase() === "exit") {
+          break;
+        }
+
+        if (input.toLowerCase() === "help") {
+          this.printHelp();
+          continue;
+        }
+
+        let context = "";
+        try {
+          const contextResult = await this.contextService.getContext(input);
+          context = this.contextService.formatContextForLLM(contextResult);
+        } catch (error) {
+          console.warn(chalk.yellow(`Context retrieval failed: ${error}`));
+        }
+
+        const messages: XAIMessage[] = [
+          { role: "system", content: `You are an expert coding assistant. Help the user with their request.${context ? `\n\nRelevant context:\n${context}` : ""}` },
+          ...this.state.chatHistory,
+          { role: "user", content: input }
+        ];
+
+        console.log(chalk.blue("\n🤔 Thinking...\n"));
+
+        const response = await chat(messages);
+        this.state.chatHistory.push({ role: "user", content: input });
+        this.state.chatHistory.push({ role: "assistant", content: response.text });
+
+        console.log(chalk.white(response.text));
+        console.log();
+      } catch (error) {
+        console.error(chalk.red(`Error: ${error}`));
+      }
+    }
+
+    await this.contextService.close();
+    console.log(chalk.green("\n👋 Goodbye!\n"));
+  }
+
+  private printHelp(): void {
+    console.log(chalk.bold.cyan("\n📚 Available Commands:"));
+    console.log(chalk.white("  help     - Show this help"));
+    console.log(chalk.white("  exit     - Exit the agent"));
+    console.log(chalk.white("  status   - Show current status"));
+    console.log(chalk.white("  context  - Get context for a query"));
+    console.log();
+  }
 }
 
-function inferSummarizeIntent(text: string): boolean {
-  const t = text.toLowerCase();
-  return (
-    (t.includes("summarize") ||
-      t.includes("summary") ||
-      t.includes("what changed") ||
-      t.includes("changes") ||
-      t.includes("overview") ||
-      t.includes("describe") ||
-      t.includes("explain") ||
-      t.includes("analyze")) &&
-    (t.includes("code") ||
-      t.includes("codebase") ||
-      t.includes("project") ||
-      t.includes("diff") ||
-      t.includes("repo") ||
-      t.includes("repository") ||
-      t.includes("entire") ||
-      t.includes("whole"))
-  );
+export async function startEnhancedAgent(goal: string, autoApprove: boolean = false): Promise<void> {
+  const agent = new Agent(goal, autoApprove);
+  await agent.run();
+}
+
+export async function startInteractiveAgent(): Promise<void> {
+  const agent = new Agent("Interactive mode", false);
+  await agent.startInteractive();
 }

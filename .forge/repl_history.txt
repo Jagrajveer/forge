@@ -1,0 +1,18 @@
+/status
+git commit with appropriate message
+/exit
+clear
+clear
+git commit with appropriate message and description based on  the code changes
+git commit with appropriate message and description based on the code chnages
+git commit with appropriate message and description based onthe code changes
+git commit based on the code changes with appropriate message and description
+git commit with appropriate message and description based on the code changes
+git commit with appropriate message and description based on the code changes
+git commit with appropriate message and description based on the code changes
+git commit with appropriate message and description based on the code changes
+/status
+/help
+git commit with appropriate message and description based on the code changes
+git commit with appropriate message and description based on the code changes
+git commit with appropriate message and description based on the code changes
