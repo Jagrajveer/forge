@@ -13,6 +13,7 @@ export interface RunOptions {
   shell?: string | boolean;
   timeoutMs?: number;
   stdioCapBytes?: number; // soft cap for aggregated stdout/stderr
+  args?: string[]; // command arguments (when cmd is just the executable)
 }
 
 const DEFAULT_TIMEOUT =
@@ -49,7 +50,8 @@ export function runCommand(
   const stdioCap = opts.stdioCapBytes ?? DEFAULT_STDIO_CAP;
 
   return new Promise((resolve, reject) => {
-    const child = spawn(cmd, {
+    const args = opts.args || [];
+    const child = spawn(cmd, args, {
       cwd: opts.cwd,
       env: { ...process.env, ...(opts.env || {}) },
       // On Windows, using shell ensures .bat/.cmd & built-ins resolve correctly. :contentReference[oaicite:2]{index=2}

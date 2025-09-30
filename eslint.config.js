@@ -7,7 +7,7 @@ import tseslint from "typescript-eslint";
 
 export default [
   // Global ignores (must be its own item)
-  { ignores: ["dist/**", "node_modules/**"] },
+  { ignores: ["dist/**", "node_modules/**", "vitest.config.ts"] },
 
   // JavaScript files
   { ...js.configs.recommended, files: ["**/*.{js,cjs,mjs}"] },

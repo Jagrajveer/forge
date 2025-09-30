@@ -1,4 +1,6 @@
 import { runCommand } from "./run.js";
+import { validateBranchName, validateCommitMessage } from "../validation.js";
+import { ToolError, handleError, ExecutionError } from "../errors.js";
 
 /** git status --porcelain=v1 (stable for scripts) */
 export async function gitStatusPorcelain(cwd: string = process.cwd()): Promise<string> {
@@ -32,13 +34,72 @@ export async function gitLogShort(n = 10, cwd: string = process.cwd()): Promise<
 
 /** Create a new branch (switch -c) */
 export async function gitCreateBranch(name: string, cwd: string = process.cwd()) {
-  const { stdout, stderr, code } = await runCommand(`git switch -c ${name}`, { cwd });
-  return { ok: code === 0, output: (stdout || stderr).trim() };
+  try {
+    validateBranchName(name);
+    
+    const { stdout, stderr, code } = await runCommand("git", { 
+      cwd,
+      args: ["switch", "-c", name]
+    });
+    
+    if (code !== 0) {
+      throw new ExecutionError(
+        `Failed to create branch: ${stderr || stdout}`,
+        `git switch -c ${name}`,
+        code || undefined,
+        { branchName: name, cwd }
+      );
+    }
+    
+    return { ok: true, output: (stdout || stderr).trim() };
+  } catch (error) {
+    const forgeError = handleError(error);
+    throw new ToolError("git", forgeError.message, {
+      operation: "create_branch",
+      branchName: name,
+      cwd,
+      originalError: forgeError
+    });
+  }
 }
 
 /** Add all & commit with message (Conventional Commits encouraged) */
 export async function gitCommit(message: string, cwd: string = process.cwd()) {
-  await runCommand("git add -A", { cwd });
-  const { stdout, stderr, code } = await runCommand(`git commit -m "${message.replace(/"/g, '\\"')}"`, { cwd });
-  return { ok: code === 0, output: (stdout || stderr).trim() };
+  try {
+    validateCommitMessage(message);
+    
+    const addResult = await runCommand("git", { cwd, args: ["add", "-A"] });
+    if (addResult.code !== 0) {
+      throw new ExecutionError(
+        `Failed to add files: ${addResult.stderr || addResult.stdout}`,
+        "git add -A",
+        addResult.code || undefined,
+        { cwd }
+      );
+    }
+    
+    const commitResult = await runCommand("git", { 
+      cwd, 
+      args: ["commit", "-m", message] 
+    });
+    
+    if (commitResult.code !== 0) {
+      throw new ExecutionError(
+        `Failed to commit: ${commitResult.stderr || commitResult.stdout}`,
+        `git commit -m "${message}"`,
+        commitResult.code || undefined,
+        { commitMessage: message, cwd }
+      );
+    }
+    
+    return { ok: true, output: (commitResult.stdout || commitResult.stderr).trim() };
+  } catch (error) {
+    const forgeError = handleError(error);
+    throw new ToolError("git", forgeError.message, {
+      operation: "commit",
+      commitMessage: message,
+      cwd,
+      originalError: forgeError
+    });
+  }
 }

@@ -18,10 +18,10 @@ export interface ChatOptions {
 
 export interface LLM {
   // Streaming overload
-  chat(messages: ChatMessage[], options: ChatOptions & { stream: true }): AsyncIterable<string>;
+  chat(messages: ChatMessage[], options: ChatOptions & { stream: true }): AsyncIterable<{ content: string; reasoning?: string }>;
   // Non-streaming overload (default)
   chat(
     messages: ChatMessage[],
     options?: ChatOptions & { stream?: false }
-  ): Promise<{ text: string; usage?: UsageMeta }>;
+  ): Promise<{ text: string; usage?: UsageMeta; reasoning?: string }>;
 }

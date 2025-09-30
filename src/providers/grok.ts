@@ -50,11 +50,11 @@ export class GrokProvider implements LLM {
   }
 
   // === Overloads (must mirror the LLM interface) ===
-  public chat(messages: ChatMessage[], options: ChatOptions & { stream: true }): AsyncIterable<string>;
+  public chat(messages: ChatMessage[], options: ChatOptions & { stream: true }): AsyncIterable<{ content: string; reasoning?: string }>;
   public chat(
     messages: ChatMessage[],
     options?: ChatOptions & { stream?: false }
-  ): Promise<{ text: string; usage?: UsageMeta }>;
+  ): Promise<{ text: string; usage?: UsageMeta; reasoning?: string }>;
 
   // === Implementation (broad signature; explicit `any` return type to satisfy overload compatibility) ===
   // See TS handbook: overload signatures appear above a single implementation; the implementation must be compatible with all overloads. :contentReference[oaicite:2]{index=2}
@@ -101,6 +101,8 @@ export class GrokProvider implements LLM {
         const decoder = new TextDecoder();
         let buf = "";
 
+        let reasoningBuffer = "";
+        
         while (true) {
           const { value, done } = await reader.read();
           if (done) break;
@@ -117,18 +119,36 @@ export class GrokProvider implements LLM {
             if (payload === "[DONE]") return;
             try {
               const json = JSON.parse(payload);
+              
+              // Extract content
               const delta =
                 json.choices?.[0]?.delta?.content ??
                 json.choices?.[0]?.message?.content ??
                 "";
-              if (delta) yield String(delta);
+              
+              // Extract reasoning if available
+              const reasoningDelta = 
+                json.choices?.[0]?.delta?.reasoning ??
+                json.choices?.[0]?.message?.reasoning ??
+                "";
+              
+              if (reasoningDelta) {
+                reasoningBuffer += reasoningDelta;
+              }
+              
+              if (delta) {
+                yield { 
+                  content: String(delta), 
+                  reasoning: reasoningDelta ? reasoningBuffer : undefined 
+                };
+              }
             } catch {
               // ignore malformed partials
             }
           }
         }
 
-        // Flush a final complete event if it’s sitting in the buffer
+        // Flush a final complete event if it's sitting in the buffer
         const tail = buf.trim();
         if (tail.startsWith("data:")) {
           const payload = tail.slice(5).trim();
@@ -139,7 +159,17 @@ export class GrokProvider implements LLM {
                 json.choices?.[0]?.delta?.content ??
                 json.choices?.[0]?.message?.content ??
                 "";
-              if (delta) yield String(delta);
+              const reasoningDelta = 
+                json.choices?.[0]?.delta?.reasoning ??
+                json.choices?.[0]?.message?.reasoning ??
+                "";
+              
+              if (delta) {
+                yield { 
+                  content: String(delta), 
+                  reasoning: reasoningDelta ? reasoningBuffer + reasoningDelta : undefined 
+                };
+              }
             } catch {
               // ignore
             }
@@ -172,6 +202,10 @@ export class GrokProvider implements LLM {
         json.choices?.[0]?.message?.content ??
         json.choices?.[0]?.delta?.content ??
         "";
+      const reasoning = 
+        json.choices?.[0]?.message?.reasoning ??
+        json.choices?.[0]?.delta?.reasoning ??
+        undefined;
       const usage: UsageMeta | undefined = json.usage
         ? {
             inputTokens: json.usage.prompt_tokens,
@@ -180,7 +214,7 @@ export class GrokProvider implements LLM {
             model: json.model, // optional, display only
           }
         : undefined;
-      return { text, usage };
+      return { text, usage, reasoning };
     };
 
     return doFetch();

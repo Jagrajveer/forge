@@ -4,73 +4,99 @@ import prompts from "prompts";
 import * as fs from "node:fs";
 import * as path from "node:path";
 
-import { Agent } from "./core/agent.js";
-import { ensureConfigDir, loadProfile } from "./config/profile.js";
 import { env } from "./config/env.js";
+import { ensureConfigDir, loadProfile } from "./config/profile.js";
+import { Agent } from "./core/agent.js";
 import { GrokProvider } from "./providers/grok.js";
 import { summarizeChangesWithModel } from "./core/flows/summarize_changes.js";
 import { renderTokensPanel } from "./ui/render.js";
-import { runCommand } from "./core/tools/run.js";
-import { gitStatusPorcelain, gitDiffStat } from "./core/tools/git.js";
+import { registerAuthXaiCommands } from "./commands/auth-xai.js";
+import { registerPluginCommands } from "./commands/plugins.js";
+import { log, setLogLevel } from "./core/logger.js";
 
 const program = new Command();
 program.name("forge").description("Grok-powered engineering copilot");
 
-// Shared flags
-function verifyOpt(cmd: Command) {
-  return cmd.option("--verify <mode>", "post-edit check: none|lint|test|both", "none");
-}
-function safetyOpts(cmd: Command) {
-  return cmd
-    .option("--safe", "always ask before run/write (strict)", false)
-    .option("--auto", "no confirmations (CI-like)", false);
-}
+/** chat (interactive) */
+program
+  .command("chat")
+  .description("Interactive chat session with the model")
+  .option("--trace <level>", "reasoning visibility: none|plan|verbose", "plan")
+  .option("--verify <mode>", "none|lint|test|both", "none")
+  .option("--auto", "auto-approve tool actions", false)
+  .option("--safe", "require approval for writes & commands", false)
+  .option("--log", "enable detailed logging", false)
+  .action(async (opts) => {
+    // Set logging level based on --log flag
+    if (opts.log) {
+      setLogLevel("debug");
+    } else {
+      setLogLevel("warn"); // Only show warnings and errors by default
+    }
+    
+    log.info("Starting interactive chat session", { options: opts });
+    ensureConfigDir();
+    const agent = new Agent({
+      trace: opts.trace,
+      approvalLevel: opts.auto ? "auto" : opts.safe ? "safe" : "balanced",
+      verifyMode: opts.verify,
+      execute: true, // Enable execution by default
+    });
 
-/** CHAT */
-verifyOpt(
-  safetyOpts(
-    program
-      .command("chat")
-      .description("interactive chat (agent can plan + act with approvals)")
-      .option("--trace <level>", "reasoning visibility: none|plan|verbose", "plan")
-      .option("--refresh", "legacy re-render mode", false)
-      .option("--no-exec", "parse but do not execute model actions")
-  )
-).action(async (opts) => {
-  ensureConfigDir();
-  const agent = new Agent({
-    trace: opts.trace,
-    appendOnly: !opts.refresh,
-    execute: opts.exec !== false,
-    approvalLevel: opts.auto ? "auto" : opts.safe ? "safe" : "balanced",
-    verifyMode: opts.verify,
+    const onInput = async () => {
+      const { msg } = await prompts({
+        type: "text",
+        name: "msg",
+        message: "you ...",
+      });
+      return (msg ?? "").toString();
+    };
+
+    try {
+      await agent.chatInteractive(onInput);
+      log.info("Chat session ended");
+    } catch (error) {
+      log.error("Chat session failed", { error: error instanceof Error ? error.message : String(error) });
+      throw error;
+    }
   });
 
-  const onInput = async () => {
-    const { text } = await prompts({ type: "text", name: "text", message: "you" });
-    return text as string;
-  };
-
-  await agent.chatInteractive(onInput);
-});
-
-/** ASK */
-verifyOpt(
-  safetyOpts(
-    program
-      .command("ask <prompt...>")
-      .description("one-shot question (optionally verify after edits)")
-      .option("--trace <level>", "reasoning visibility: none|plan|verbose", "plan")
-  )
-).action(async (parts, opts) => {
-  ensureConfigDir();
-  const agent = new Agent({
-    trace: opts.trace,
-    approvalLevel: opts.auto ? "auto" : opts.safe ? "safe" : "balanced",
-    verifyMode: opts.verify,
+/** ask (one-shot) */
+program
+  .command("ask <prompt...>")
+  .description("One-shot question (optionally verify after edits)")
+  .option("--trace <level>", "reasoning visibility: none|plan|verbose", "plan")
+  .option("--verify <mode>", "none|lint|test|both", "none")
+  .option("--auto", "auto-approve tool actions", false)
+  .option("--safe", "require approval for writes & commands", false)
+  .option("--log", "enable detailed logging", false)
+  .action(async (parts, opts) => {
+    // Set logging level based on --log flag
+    if (opts.log) {
+      setLogLevel("debug");
+    } else {
+      setLogLevel("warn"); // Only show warnings and errors by default
+    }
+    
+    const prompt = Array.isArray(parts) ? parts.join(" ") : String(parts);
+    log.info("Starting oneshot query", { prompt: prompt.slice(0, 100) + (prompt.length > 100 ? "..." : ""), options: opts });
+    
+    ensureConfigDir();
+    const agent = new Agent({
+      trace: opts.trace,
+      approvalLevel: opts.auto ? "auto" : opts.safe ? "safe" : "balanced",
+      verifyMode: opts.verify,
+      execute: true, // Enable execution by default
+    });
+    
+    try {
+      await agent.oneshot(prompt);
+      log.info("Oneshot query completed");
+    } catch (error) {
+      log.error("Oneshot query failed", { error: error instanceof Error ? error.message : String(error) });
+      throw error;
+    }
   });
-  await agent.oneshot(parts.join(" "));
-});
 
 /** env doctor */
 const envCmd = program.command("env").description("environment utilities");
@@ -80,95 +106,51 @@ envCmd
   .action(async () => {
     ensureConfigDir();
     const cfg = loadProfile();
-    const loaded = env.LOADED_ENV_FILES.join(", ") || "(none)";
-    const lines: string[] = [];
-    lines.push("## Environment");
-    lines.push(`- loaded: ${loaded}`);
-    lines.push(`- provider: ${cfg.provider}`);
-    lines.push(`- baseUrl: ${cfg.baseUrl}`);
-    lines.push(`- model: ${cfg.model}`);
-    lines.push("");
-    process.stdout.write(lines.join("\n"));
-  });
 
-/** auth test */
-const authCmd = program.command("auth").description("authentication & connectivity");
-authCmd
-  .command("test")
-  .description("ping the model and print model/usage")
-  .action(async () => {
-    ensureConfigDir();
-    const llm = new GrokProvider();
-    const { text, usage } = (await llm.chat(
-      [
-        { role: "system", content: "You are a ping-check." },
-        { role: "user", content: "Respond with 'pong'." },
-      ],
-      { stream: false }
-    )) as { text: string; usage?: any };
+    console.log("## Environment");
+    console.log(`- loaded: ${(env.LOADED_ENV_FILES || []).join(", ") || "(none)"}`);
+    console.log(`- provider: ${cfg.provider}`);
+    console.log(`- baseUrl: ${cfg.baseUrl ?? "(default)"}`);
+    console.log(`- model: ${cfg.model}`);
 
-    process.stdout.write(`response: ${text.trim() || "(empty)"}\n`);
-    if (usage) process.stdout.write(renderTokensPanel(usage));
-  });
+    // quick ping to provider
+    try {
+      const llm = new GrokProvider(cfg);
+      const res = (await llm.chat(
+        [
+          { role: "system", content: "You are a diagnostic assistant." },
+          { role: "user", content: "Reply with: pong" },
+        ],
+        { stream: false, temperature: 0 },
+      )) as { text: string; usage?: any };
 
-/** changes (diff-only) */
-program
-  .command("changes")
-  .description("summarize current repo changes via Grok (diffs only)")
-  .option("--trace <level>", "reasoning visibility: none|plan|verbose", "plan")
-  .option("--temperature <n>", "model temperature", "0.2")
-  .action(async (opts) => {
-    ensureConfigDir();
-    const llm = new GrokProvider();
-    const md = await summarizeChangesWithModel(llm, {
-      trace: opts.trace,
-      temperature: Number(opts.temperature) || 0.2,
-      maxChars: 180_000,
-    });
-    process.stdout.write(md ? md + "\n" : "_No summary produced._\n");
-  });
-
-/** init (memory template) */
-program
-  .command("init")
-  .description("create .forge/ with MEMORY.md template if missing")
-  .action(async () => {
-    ensureConfigDir();
-    const dir = path.join(process.cwd(), ".forge");
-    const mem = path.join(dir, "MEMORY.md");
-    if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
-    if (!fs.existsSync(mem)) {
-      fs.writeFileSync(
-        mem,
-        `# Project Memory
-
-## Build & Run
-- build: npm run build
-- start: npm start
-- test: npm test
-- lint: npm run lint
-
-## Tech & Style
-- Node 20+, TypeScript strict.
-- ESLint (flat config) + Prettier optional.
-
-## Domain Notes
-- High-level architecture…
-- Critical invariants…
-
-## Do / Don’t
-- DO run tests after every change.
-- DON’T edit infra/k8s/ without explicit request.
-`,
-        "utf8"
-      );
-      process.stdout.write(`created ${mem}\n`);
-    } else {
-      process.stdout.write(`already exists: ${mem}\n`);
+      console.log("\nresponse:", (res.text || "").slice(0, 200));
+      if (res.usage) process.stdout.write(renderTokensPanel(res.usage));
+    } catch (e: any) {
+      console.error("Ping failed:", e?.message || e);
     }
   });
 
-/** lint helpers */
-const lintGroup = program.command("lint").description("ESLint helpers");
+/** summarize working tree diffs using the model */
+program
+  .command("changes")
+  .description("summarize code changes from current working tree diffs")
+  .option("--trace <level>", "reasoning visibility: none|plan|verbose", "plan")
+  .action(async (opts) => {
+    ensureConfigDir();
+    const llm = new GrokProvider();
+    const md = await summarizeChangesWithModel(llm, { trace: opts.trace });
+    process.stdout.write(md + "\n");
+  });
 
-program.parseAsync(process.argv);
+/** auth (xAI) */
+registerAuthXaiCommands(program);
+
+/** plugins */
+registerPluginCommands(program);
+
+/** parse CLI */
+program.parseAsync(process.argv).catch((err) => {
+  console.error(err?.stack || String(err));
+  process.exit(1);
+});

@@ -23,6 +23,21 @@ export const Action = z.discriminatedUnion("tool", [
     subtool: z.string(),
     args: z.record(z.any()).optional(),
   }),
+  z.object({
+    tool: z.literal("npm"),
+    subtool: z.string(),
+    args: z.record(z.any()).optional(),
+  }),
+  z.object({
+    tool: z.literal("docker"),
+    subtool: z.string(),
+    args: z.record(z.any()).optional(),
+  }),
+  z.object({
+    tool: z.literal("search"),
+    subtool: z.string(),
+    args: z.record(z.any()).optional(),
+  }),
 ]);
 
 /** Contract the model streams back (optionally inside ```json fences). */
