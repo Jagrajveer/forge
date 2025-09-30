@@ -64,6 +64,24 @@ export function renderTokensPanel(usage: {
   ].join("\n");
 }
 
+export function renderContextPanel(stats: {
+  filesRead?: number;
+  bytesRead?: number;
+  approxTokens?: number;
+}) {
+  const files = stats.filesRead ?? 0;
+  const bytes = stats.bytesRead ?? 0;
+  const toks = stats.approxTokens ?? 0;
+  return [
+    "\n",
+    chalk.gray("┌─ context ───────────────────────────────────────┐"),
+    chalk.gray(`│ files: ${String(files).padStart(6)}  bytes: ${String(bytes).padStart(10)}  tokens*: ${String(toks).padStart(8)} │`),
+    chalk.gray("│ *approx tokens = chars/4                           │"),
+    chalk.gray("└──────────────────────────────────────────────────┘"),
+    "\n",
+  ].join("\n");
+}
+
 export function renderWelcomeBanner() {
   const banner = figlet.textSync("FORGE", {
     font: "ANSI Shadow",

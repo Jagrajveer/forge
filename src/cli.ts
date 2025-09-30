@@ -61,7 +61,19 @@ program
         name: "msg",
         message: "💬 ",
       });
-      return (msg ?? "").toString();
+      const s = (msg ?? "").toString();
+      if (s.trim().startsWith("/config")) {
+        const cfg = loadProfile();
+        console.log("\nCurrent config:");
+        console.log(`- provider: ${cfg.provider}`);
+        console.log(`- baseUrl: ${cfg.baseUrl ?? "(default)"}`);
+        console.log(`- model: ${cfg.model}`);
+        console.log(`- tokensPanel: ${cfg.tokensPanel ? "on" : "off"}`);
+        console.log(`- defaultTrace: ${cfg.defaultTrace ?? "plan"}`);
+        console.log("");
+        return ""; // skip sending to agent
+      }
+      return s;
     };
 
     try {

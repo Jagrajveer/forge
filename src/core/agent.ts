@@ -3,7 +3,7 @@ import { systemPrompt } from "./prompts/system.js";
 import type { TraceLevel } from "./prompts/system.js";
 import { parseModelJSON } from "./contracts.js";
 import type { ModelJSONT } from "./contracts.js";
-import { AppendOnlyStream, renderPlan, renderUserPrompt, renderAssistantResponse, renderSeparator } from "../ui/render.js";
+import { AppendOnlyStream, renderPlan, renderUserPrompt, renderAssistantResponse, renderSeparator, renderTokensPanel, renderContextPanel } from "../ui/render.js";
 import { startThinkingAnimation, startProcessingAnimation, stopAnimation, succeedAnimation, failAnimation } from "../ui/animations.js";
 import { summarizeChangesWithModel, summarizeCodebaseWithModel } from "./flows/summarize_changes.js";
 import { planOnly } from "./flows/plan_only.js";
@@ -38,6 +38,8 @@ type ChatMessage = { role: ChatRole; content: string };
 export class Agent {
   private llm = new GrokProvider();
   private sessionLog?: SessionLog;
+  private filesReadCount = 0;
+  private bytesReadCount = 0;
   
   constructor(private opts: AgentOptions = {}) {
     // Initialize session logging if enabled
@@ -168,7 +170,7 @@ export class Agent {
         }
 
         // Display thinking/reasoning if available and trace level allows it
-        if (reasoning && (this.opts.trace ?? "plan") !== "none") {
+        if (reasoning && (this.opts.trace ?? "plan") === "verbose") {
           out.write("\n" + renderSeparator() + "\n");
           out.write("💭 Thinking:\n");
           out.write("```\n" + reasoning + "\n```\n");
@@ -224,31 +226,28 @@ export class Agent {
 
             if (tool === "open_file") {
               const { path } = action as any;
-              out.write(`\n📖 Reading: ${path}\n`);
+              // silent read with subtle animation
+              startProcessingAnimation();
               try {
                 const res = await executeTool({ tool: "open_file", args: { path } });
+                stopAnimation();
+                // track context silently
+                this.filesReadCount += 1;
+                this.bytesReadCount += res.content ? Buffer.byteLength(res.content, "utf8") : 0;
                 
-                // For summary tasks, don't show raw content - just indicate what was read
-                if (inferSummarizeIntent(user)) {
-                  const fileSize = res.content ? res.content.length : 0;
-                  const lines = res.content ? res.content.split('\n').length : 0;
-                  out.write(`✓ Read ${path} (${lines} lines, ${fileSize} chars${res.truncated ? ', truncated' : ''})\n`);
-                } else {
-                  // For other tasks, show preview
-                  const preview = res.truncated
-                    ? `${res.content}\n\n…(truncated)…`
-                    : res.content;
-                  out.write("```text\n" + (preview || "(empty)") + "\n```\n");
-                }
+                // do not print content; optionally log observation
+                const fileSize = res.content ? res.content.length : 0;
+                const lines = res.content ? res.content.split('\n').length : 0;
                 
                 const observation = {
                   title: `open_file ${path}`,
-                  body: `Read ${path} (${res.truncated ? "truncated" : "full"}) - ${res.content ? res.content.length : 0} chars`,
+                  body: `Read ${path} (${lines} lines, ${fileSize} chars${res.truncated ? ', truncated' : ''})`,
                 };
                 observations.push(observation);
                 this.logToolExecution("open_file", { path }, res);
                 this.logObservation(observation);
               } catch (err: any) {
+                stopAnimation();
                 const error = err instanceof ForgeError ? err : new ForgeError(err.message, "TOOL_ERROR");
                 const displayMessage = getErrorDisplayMessage(error);
                 out.write(`⚠️  open_file failed: ${displayMessage}\n`);
@@ -494,6 +493,9 @@ export class Agent {
             ...messages,
             { role: "assistant", content: `OBSERVATIONS:\n\n${obsMd}` },
           ];
+          // Show context panel after observations
+          const approxTokens = Math.floor(this.bytesReadCount / 4);
+          out.write(renderContextPanel({ filesRead: this.filesReadCount, bytesRead: this.bytesReadCount, approxTokens }));
           continue;
         }
 
