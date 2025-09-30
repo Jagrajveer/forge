@@ -68,8 +68,8 @@ program
       await agent.chatInteractive(onInput);
       log.info("Chat session ended");
     } catch (error) {
+      // Keep the process alive; report the error and return to shell without crash
       log.error("Chat session failed", { error: error instanceof Error ? error.message : String(error) });
-      throw error;
     }
   });
 
@@ -107,8 +107,8 @@ program
       await agent.oneshot(prompt);
       log.info("Oneshot query completed");
     } catch (error) {
+      // Do not crash; report and continue
       log.error("Oneshot query failed", { error: error instanceof Error ? error.message : String(error) });
-      throw error;
     }
   });
 

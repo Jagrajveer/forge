@@ -91,7 +91,13 @@ export class Agent {
     const out = new AppendOnlyStream();
 
     while (true) {
-      const user = await getUserInput();
+      let user: string;
+      try {
+        user = await getUserInput();
+      } catch (err: any) {
+        out.write(`\n⚠️  Input failed: ${err?.message || String(err)}\n`);
+        continue;
+      }
       if (!user || user.trim().toLowerCase() === "/exit") {
         if (user?.trim().toLowerCase() === "/exit") {
           out.write(renderSeparator() + "\n");
@@ -156,7 +162,10 @@ export class Agent {
         let parsed: ModelJSONT | undefined;
         try {
           parsed = parseModelJSON(collected);
-        } catch {}
+        } catch (err: any) {
+          const msg = err?.message || String(err);
+          this.logObservation({ title: "parse error", body: msg });
+        }
 
         // Display thinking/reasoning if available and trace level allows it
         if (reasoning && (this.opts.trace ?? "plan") !== "none") {
@@ -248,7 +257,6 @@ export class Agent {
               }
               continue;
             }
-
             if (tool === "run") {
               const { cmd } = action as any;
               
@@ -305,6 +313,8 @@ export class Agent {
                 out.write(`⚠️  run failed: ${displayMessage}\n`);
                 out.write("```text\n" + (err?.stderr || err?.stdout || displayMessage) + "\n```\n");
                 logError(error);
+                // Feed observation back in to allow model to adjust command
+                observations.push({ title: "run error", body: displayMessage });
               }
               continue;
             }
@@ -415,17 +425,20 @@ export class Agent {
                     continue;
                   }
                 }
-                const res = await executeTool({
-                  tool: "git",
-                  args: { subtool: "commit", message: msg },
-                });
-                out.write(
-                  `\n🌿 git commit: ${res.ok ? "created" : "failed"}\n`
-                );
-                observations.push({
-                  title: "git commit",
-                  body: res.output || (res.ok ? "commit created" : "failed"),
-                });
+                try {
+                  const res = await executeTool({
+                    tool: "git",
+                    args: { subtool: "commit", message: msg },
+                  });
+                  out.write(`\n🌿 git commit: ${res.ok ? "created" : "failed"}\n`);
+                  observations.push({ title: "git commit", body: res.output || (res.ok ? "commit created" : "failed") });
+                } catch (err: any) {
+                  const error = err instanceof ForgeError ? err : new ForgeError(err.message, "TOOL_ERROR");
+                  const displayMessage = getErrorDisplayMessage(error);
+                  out.write(`⚠️  git commit failed: ${displayMessage}\n`);
+                  observations.push({ title: "git commit error", body: displayMessage });
+                  logError(error);
+                }
                 continue;
               }
               if (subtool === "create_branch") {
