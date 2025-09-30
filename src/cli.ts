@@ -165,6 +165,11 @@ registerPluginCommands(program);
 
 /** parse CLI */
 program.parseAsync(process.argv).catch((err) => {
-  console.error(err?.stack || String(err));
+  // Do not crash; log and exit with non-zero code
+  const msg = err?.message || String(err);
+  console.error("Error:", msg);
+  if (process.env.DEBUG) {
+    console.error(err?.stack || "(no stack)");
+  }
   process.exit(1);
 });

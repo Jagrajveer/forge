@@ -119,25 +119,35 @@ export class Agent {
         // Start thinking animation
         startThinkingAnimation();
         
-        const maybeStream = this.llm.chat(messages, {
-          stream: true,
-          temperature: this.opts.temperature ?? 0.3,
-          reasoning: (this.opts.trace ?? "plan") !== "none",
-        }) as unknown;
-
-        const stream = (await maybeStream) as AsyncIterable<{ content: string; reasoning?: string }>;
         let collected = "";
         let reasoning = "";
-        
-        // Stop thinking animation and start processing
-        stopAnimation();
-        startProcessingAnimation();
-        
-        for await (const chunk of stream) {
-          collected += chunk.content;
-          if (chunk.reasoning) {
-            reasoning = chunk.reasoning;
+        try {
+          const maybeStream = this.llm.chat(messages, {
+            stream: true,
+            temperature: this.opts.temperature ?? 0.3,
+            reasoning: (this.opts.trace ?? "plan") !== "none",
+          }) as unknown;
+
+          const stream = (await maybeStream) as AsyncIterable<{ content: string; reasoning?: string }>;
+          
+          // Stop thinking animation and start processing
+          stopAnimation();
+          startProcessingAnimation();
+          
+          for await (const chunk of stream) {
+            collected += chunk.content;
+            if (chunk.reasoning) {
+              reasoning = chunk.reasoning;
+            }
           }
+        } catch (err: any) {
+          stopAnimation();
+          const msg = err?.message || String(err);
+          const observation = { title: "model stream error", body: msg } as Observation;
+          out.write(`\n⚠️  Model stream failed: ${msg}\n`);
+          this.logObservation(observation);
+          messages = [...messages, { role: "assistant", content: `OBSERVATIONS:\n\n### model stream error\n${msg}` }];
+          continue;
         }
         
         // Stop processing animation

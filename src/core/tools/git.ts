@@ -72,7 +72,7 @@ export async function gitCommit(message: string, cwd: string = process.cwd()) {
       .trim();
     validateCommitMessage(sanitized);
     
-    const addResult = await runCommand("git", { cwd, args: ["add", "-A"] });
+    const addResult = await runCommand("git", { cwd, args: ["add", "-A"], shell: false });
     if (addResult.code !== 0) {
       throw new ExecutionError(
         `Failed to add files: ${addResult.stderr || addResult.stdout}`,
@@ -89,7 +89,7 @@ export async function gitCommit(message: string, cwd: string = process.cwd()) {
       const body = rest.join("\n").trim();
       if (body) args.push("-m", body);
     }
-    const commitResult = await runCommand("git", { cwd, args });
+    const commitResult = await runCommand("git", { cwd, args, shell: false });
     
     if (commitResult.code !== 0) {
       throw new ExecutionError(

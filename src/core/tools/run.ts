@@ -51,11 +51,13 @@ export function runCommand(
 
   return new Promise((resolve, reject) => {
     const args = opts.args || [];
+    // Use shell only when no args are provided (string command). When args are provided,
+    // prefer direct exec (shell=false) to preserve exact argument boundaries across platforms.
+    const useShell = opts.shell ?? (args.length === 0);
     const child = spawn(cmd, args, {
       cwd: opts.cwd,
       env: { ...process.env, ...(opts.env || {}) },
-      // On Windows, using shell ensures .bat/.cmd & built-ins resolve correctly. :contentReference[oaicite:2]{index=2}
-      shell: opts.shell ?? true,
+      shell: useShell,
       windowsHide: true,
     });
 
